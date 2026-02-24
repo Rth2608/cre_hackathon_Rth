@@ -1,0 +1,14 @@
+{
+  "allowedDomains": [
+    "reuters.com",
+    "bloomberg.com",
+    "coindesk.com",
+    "cointelegraph.com",
+    "apnews.com",
+    "wsj.com",
+    "ft.com",
+    "theblock.co",
+    "sec.gov",
+    "federalreserve.gov"
+  ]
+}

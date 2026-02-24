@@ -1,0 +1,15 @@
+{
+  "name": "cre-hackathon-prediction-market-demo",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "orchestrator",
+    "dapp"
+  ],
+  "scripts": {
+    "dev:orchestrator": "cd orchestrator && bun run dev",
+    "test:orchestrator": "cd orchestrator && bun test",
+    "dev:dapp": "cd dapp && bun run dev",
+    "build:dapp": "cd dapp && bun run build"
+  }
+}

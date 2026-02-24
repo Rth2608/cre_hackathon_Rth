@@ -1,0 +1,501 @@
+import { randomBytes } from "node:crypto";
+import { getAddress } from "ethers";
+import { ensureDir, nowIso, readJsonFile, resolveProjectPath, writeJsonFileAtomic } from "./utils";
+
+const DEFAULT_WORLD_ID_VERIFY_API_BASE = "https://developer.worldcoin.org/api/v2/verify";
+const WORLD_ID_DB_PATH = resolveProjectPath("data", "world-id-sessions.json");
+
+interface WorldIdSessionDbSchema {
+  sessions: Record<string, StoredWorldIdSession>;
+  nullifierWalletMap: Record<string, string>;
+}
+
+interface StoredWorldIdSession {
+  token: string;
+  walletAddress: string;
+  nullifierHash: string;
+  appId: string;
+  action: string;
+  verificationLevel?: string;
+  issuedAt: string;
+  expiresAt: string;
+  source: "world_id_cloud" | "assume";
+}
+
+export interface WorldIdSession {
+  token: string;
+  walletAddress: string;
+  nullifierHash: string;
+  appId: string;
+  action: string;
+  verificationLevel?: string;
+  issuedAt: string;
+  expiresAt: string;
+  source: "world_id_cloud" | "assume";
+}
+
+export interface WorldIdProofInput {
+  // Legacy v3 payload
+  merkle_root?: unknown;
+  nullifier_hash?: unknown;
+  proof?: unknown;
+  verification_level?: unknown;
+  signal_hash?: unknown;
+  action?: unknown;
+
+  // IDKit result payload fallback
+  responses?: unknown;
+  protocol_version?: unknown;
+}
+
+interface ParsedWorldIdProofPayload {
+  merkleRoot: string;
+  nullifierHash: string;
+  proof: string | string[];
+  verificationLevel?: string;
+  signalHash?: string;
+  action?: string;
+}
+
+interface VerifyApiSuccess {
+  success: true;
+  [key: string]: unknown;
+}
+
+interface VerifyApiFailure {
+  success?: false;
+  code?: string;
+  detail?: string;
+  [key: string]: unknown;
+}
+
+interface VerifyApiResult {
+  ok: boolean;
+  status: number;
+  payload: VerifyApiSuccess | VerifyApiFailure | null;
+}
+
+function normalizeAddress(value: string): string {
+  return getAddress(value).toLowerCase();
+}
+
+function toTrimmedString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function normalizeHexStringMaybe(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  if (value.startsWith("0x") || value.startsWith("0X")) {
+    return `0x${value.slice(2).toLowerCase()}`;
+  }
+  return `0x${value.toLowerCase()}`;
+}
+
+function normalizeProofArray(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length === 0) {
+    return null;
+  }
+  const proofItems: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") {
+      return null;
+    }
+    const trimmed = item.trim();
+    if (!trimmed) {
+      return null;
+    }
+    proofItems.push(trimmed);
+  }
+  return proofItems;
+}
+
+function parseWorldIdProof(rawInput: WorldIdProofInput): ParsedWorldIdProofPayload {
+  const directMerkleRoot = toTrimmedString(rawInput.merkle_root);
+  const directNullifierHash = toTrimmedString(rawInput.nullifier_hash);
+  const directVerificationLevel = toTrimmedString(rawInput.verification_level);
+  const directSignalHash = toTrimmedString(rawInput.signal_hash);
+  const directAction = toTrimmedString(rawInput.action);
+
+  let proofValue = rawInput.proof;
+  let merkleRoot = directMerkleRoot;
+  let nullifierHash = directNullifierHash;
+  let verificationLevel = directVerificationLevel;
+  let signalHash = directSignalHash;
+  let action = directAction;
+
+  // Support IDKit result-like payload shape by reading first response entry.
+  if (
+    (!proofValue || !merkleRoot || !nullifierHash) &&
+    Array.isArray(rawInput.responses) &&
+    rawInput.responses.length > 0 &&
+    rawInput.responses[0] &&
+    typeof rawInput.responses[0] === "object"
+  ) {
+    const firstResponse = rawInput.responses[0] as Record<string, unknown>;
+    proofValue = proofValue ?? firstResponse.proof;
+    merkleRoot = merkleRoot ?? toTrimmedString(firstResponse.merkle_root);
+    nullifierHash =
+      nullifierHash ??
+      toTrimmedString(firstResponse.nullifier_hash) ??
+      toTrimmedString(firstResponse.nullifier);
+    signalHash = signalHash ?? toTrimmedString(firstResponse.signal_hash);
+  }
+
+  if (typeof proofValue === "string" && proofValue.trim().length > 0) {
+    const normalizedProof = proofValue.trim();
+    return {
+      merkleRoot: normalizeHexStringMaybe(merkleRoot) ?? "",
+      nullifierHash: normalizeHexStringMaybe(nullifierHash) ?? "",
+      proof: normalizedProof,
+      verificationLevel,
+      signalHash: normalizeHexStringMaybe(signalHash),
+      action
+    };
+  }
+
+  const proofArray = normalizeProofArray(proofValue);
+  if (proofArray) {
+    // v4 arrays often contain merkle root at index 4.
+    const derivedMerkleRoot =
+      merkleRoot ?? (proofArray.length >= 5 ? normalizeHexStringMaybe(proofArray[4]) : undefined);
+    return {
+      merkleRoot: derivedMerkleRoot ?? "",
+      nullifierHash: normalizeHexStringMaybe(nullifierHash) ?? "",
+      proof: proofArray,
+      verificationLevel,
+      signalHash: normalizeHexStringMaybe(signalHash),
+      action
+    };
+  }
+
+  throw new Error("invalid_world_id_proof_shape");
+}
+
+function assertParsedProofValid(payload: ParsedWorldIdProofPayload): void {
+  if (!payload.merkleRoot) {
+    throw new Error("missing_merkle_root");
+  }
+  if (!payload.nullifierHash) {
+    throw new Error("missing_nullifier_hash");
+  }
+  if (!payload.proof) {
+    throw new Error("missing_proof");
+  }
+}
+
+function resolveWorldIdAppId(): string {
+  return process.env.WORLD_ID_APP_ID?.trim() ?? "";
+}
+
+function resolveWorldIdAction(): string {
+  return process.env.WORLD_ID_ACTION?.trim() ?? "";
+}
+
+function resolveWorldIdVerifyApiBase(): string {
+  return (process.env.WORLD_ID_VERIFY_API_BASE_URL?.trim() ?? DEFAULT_WORLD_ID_VERIFY_API_BASE).replace(/\/$/, "");
+}
+
+function resolveWorldIdRequestTimeoutMs(): number {
+  const parsed = Number.parseInt(process.env.WORLD_ID_VERIFY_TIMEOUT_MS?.trim() ?? "", 10);
+  if (!Number.isFinite(parsed) || parsed < 1000 || parsed > 30000) {
+    return 8000;
+  }
+  return parsed;
+}
+
+function resolveWorldIdSessionTtlSeconds(): number {
+  const parsed = Number.parseInt(process.env.WORLD_ID_SESSION_TTL_SECONDS?.trim() ?? "", 10);
+  if (!Number.isFinite(parsed) || parsed < 60 || parsed > 86400 * 30) {
+    return 60 * 60 * 24;
+  }
+  return parsed;
+}
+
+function parseBooleanEnv(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined) return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (["true", "1", "yes", "y", "on"].includes(normalized)) return true;
+  if (["false", "0", "no", "n", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+export function isWorldIdAssumeEnabled(): boolean {
+  return parseBooleanEnv(process.env.ASSUME_WORLD_ID_VERIFIED, false);
+}
+
+async function loadDb(): Promise<WorldIdSessionDbSchema> {
+  await ensureDir(resolveProjectPath("data"));
+  return readJsonFile<WorldIdSessionDbSchema>(WORLD_ID_DB_PATH, {
+    sessions: {},
+    nullifierWalletMap: {}
+  });
+}
+
+async function saveDb(db: WorldIdSessionDbSchema): Promise<void> {
+  await writeJsonFileAtomic(WORLD_ID_DB_PATH, db);
+}
+
+function normalizeStoredSession(session: StoredWorldIdSession): StoredWorldIdSession {
+  return {
+    token: session.token,
+    walletAddress: normalizeAddress(session.walletAddress),
+    nullifierHash: normalizeHexStringMaybe(session.nullifierHash) ?? session.nullifierHash,
+    appId: session.appId.trim(),
+    action: session.action.trim(),
+    verificationLevel: session.verificationLevel?.trim(),
+    issuedAt: session.issuedAt,
+    expiresAt: session.expiresAt,
+    source: session.source === "assume" ? "assume" : "world_id_cloud"
+  };
+}
+
+function toPublicSession(session: StoredWorldIdSession): WorldIdSession {
+  const normalized = normalizeStoredSession(session);
+  return {
+    token: normalized.token,
+    walletAddress: normalized.walletAddress,
+    nullifierHash: normalized.nullifierHash,
+    appId: normalized.appId,
+    action: normalized.action,
+    verificationLevel: normalized.verificationLevel,
+    issuedAt: normalized.issuedAt,
+    expiresAt: normalized.expiresAt,
+    source: normalized.source
+  };
+}
+
+function isExpired(isoDate: string): boolean {
+  const epochMs = Date.parse(isoDate);
+  if (!Number.isFinite(epochMs)) {
+    return true;
+  }
+  return epochMs <= Date.now();
+}
+
+async function loadDbWithPrune(): Promise<WorldIdSessionDbSchema> {
+  const db = await loadDb();
+  let mutated = false;
+
+  for (const [token, rawSession] of Object.entries(db.sessions)) {
+    const normalized = normalizeStoredSession(rawSession);
+    if (isExpired(normalized.expiresAt)) {
+      delete db.sessions[token];
+      mutated = true;
+      continue;
+    }
+    db.sessions[token] = normalized;
+  }
+
+  if (mutated) {
+    await saveDb(db);
+  }
+
+  return db;
+}
+
+async function verifyWithWorldCloud(input: {
+  appId: string;
+  expectedAction: string;
+  proofPayload: ParsedWorldIdProofPayload;
+}): Promise<VerifyApiResult> {
+  const timeoutMs = resolveWorldIdRequestTimeoutMs();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  const requestBody: Record<string, unknown> = {
+    merkle_root: input.proofPayload.merkleRoot,
+    nullifier_hash: input.proofPayload.nullifierHash,
+    proof: input.proofPayload.proof,
+    action: input.expectedAction
+  };
+  if (input.proofPayload.signalHash) {
+    requestBody.signal_hash = input.proofPayload.signalHash;
+  }
+  if (input.proofPayload.verificationLevel) {
+    requestBody.verification_level = input.proofPayload.verificationLevel;
+  }
+
+  const verifyUrl = `${resolveWorldIdVerifyApiBase()}/${input.appId}`;
+
+  try {
+    const response = await fetch(verifyUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "cre-don-world-id-demo/1.0"
+      },
+      body: JSON.stringify(requestBody),
+      signal: controller.signal
+    });
+
+    let payload: VerifyApiSuccess | VerifyApiFailure | null = null;
+    try {
+      payload = (await response.json()) as VerifyApiSuccess | VerifyApiFailure;
+    } catch {
+      payload = null;
+    }
+
+    const ok = response.ok && payload !== null && payload.success === true;
+    return {
+      ok,
+      status: response.status,
+      payload
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function buildSession(input: {
+  walletAddress: string;
+  nullifierHash: string;
+  appId: string;
+  action: string;
+  verificationLevel?: string;
+  source: "world_id_cloud" | "assume";
+}): StoredWorldIdSession {
+  const issuedAt = nowIso();
+  const expiresAt = new Date(Date.now() + resolveWorldIdSessionTtlSeconds() * 1000).toISOString();
+  return {
+    token: `wid_${randomBytes(24).toString("hex")}`,
+    walletAddress: normalizeAddress(input.walletAddress),
+    nullifierHash: normalizeHexStringMaybe(input.nullifierHash) ?? input.nullifierHash,
+    appId: input.appId,
+    action: input.action,
+    verificationLevel: input.verificationLevel,
+    issuedAt,
+    expiresAt,
+    source: input.source
+  };
+}
+
+function nullifierBoundToDifferentWallet(input: {
+  db: WorldIdSessionDbSchema;
+  nullifierHash: string;
+  walletAddress: string;
+}): boolean {
+  const key = normalizeHexStringMaybe(input.nullifierHash) ?? input.nullifierHash;
+  const boundWallet = input.db.nullifierWalletMap[key];
+  if (!boundWallet) {
+    return false;
+  }
+  return boundWallet !== normalizeAddress(input.walletAddress);
+}
+
+export async function issueWorldIdSessionFromProof(input: {
+  walletAddress: string;
+  rawProof: WorldIdProofInput;
+}): Promise<WorldIdSession> {
+  const normalizedWalletAddress = normalizeAddress(input.walletAddress);
+  const appId = resolveWorldIdAppId();
+  const expectedAction = resolveWorldIdAction();
+
+  if (!appId) {
+    throw new Error("world_id_app_id_missing");
+  }
+  if (!expectedAction) {
+    throw new Error("world_id_action_missing");
+  }
+
+  const parsedProof = parseWorldIdProof(input.rawProof);
+  assertParsedProofValid(parsedProof);
+
+  if (parsedProof.action && parsedProof.action !== expectedAction) {
+    throw new Error(`world_id_action_mismatch: expected ${expectedAction}, got ${parsedProof.action}`);
+  }
+
+  if (isWorldIdAssumeEnabled()) {
+    const db = await loadDbWithPrune();
+    if (
+      nullifierBoundToDifferentWallet({
+        db,
+        nullifierHash: parsedProof.nullifierHash,
+        walletAddress: normalizedWalletAddress
+      })
+    ) {
+      throw new Error("world_id_nullifier_already_bound_to_different_wallet");
+    }
+
+    const session = buildSession({
+      walletAddress: normalizedWalletAddress,
+      nullifierHash: parsedProof.nullifierHash,
+      appId,
+      action: expectedAction,
+      verificationLevel: parsedProof.verificationLevel,
+      source: "assume"
+    });
+    db.sessions[session.token] = session;
+    db.nullifierWalletMap[session.nullifierHash] = session.walletAddress;
+    await saveDb(db);
+    return toPublicSession(session);
+  }
+
+  const verifyResult = await verifyWithWorldCloud({
+    appId,
+    expectedAction,
+    proofPayload: parsedProof
+  });
+  if (!verifyResult.ok) {
+    const detail = verifyResult.payload && typeof verifyResult.payload.detail === "string" ? verifyResult.payload.detail : "";
+    const code = verifyResult.payload && typeof verifyResult.payload.code === "string" ? verifyResult.payload.code : "";
+    const reason = [code, detail].filter(Boolean).join(" ");
+    throw new Error(`world_id_verify_failed (${verifyResult.status})${reason ? `: ${reason}` : ""}`);
+  }
+
+  const db = await loadDbWithPrune();
+  if (
+    nullifierBoundToDifferentWallet({
+      db,
+      nullifierHash: parsedProof.nullifierHash,
+      walletAddress: normalizedWalletAddress
+    })
+  ) {
+    throw new Error("world_id_nullifier_already_bound_to_different_wallet");
+  }
+
+  const session = buildSession({
+    walletAddress: normalizedWalletAddress,
+    nullifierHash: parsedProof.nullifierHash,
+    appId,
+    action: expectedAction,
+    verificationLevel: parsedProof.verificationLevel,
+    source: "world_id_cloud"
+  });
+
+  db.sessions[session.token] = session;
+  db.nullifierWalletMap[session.nullifierHash] = session.walletAddress;
+  await saveDb(db);
+  return toPublicSession(session);
+}
+
+export async function validateWorldIdSessionToken(input: {
+  token: string;
+  walletAddress: string;
+}): Promise<{ ok: true; session: WorldIdSession } | { ok: false; reason: string }> {
+  const token = input.token.trim();
+  if (!token) {
+    return { ok: false, reason: "world_id_token_required" };
+  }
+
+  const normalizedWallet = normalizeAddress(input.walletAddress);
+  const db = await loadDbWithPrune();
+  const session = db.sessions[token];
+
+  if (!session) {
+    return { ok: false, reason: "world_id_token_not_found" };
+  }
+  if (isExpired(session.expiresAt)) {
+    return { ok: false, reason: "world_id_token_expired" };
+  }
+  const normalizedSessionWallet = normalizeAddress(session.walletAddress);
+  if (normalizedSessionWallet !== normalizedWallet) {
+    return { ok: false, reason: "world_id_token_wallet_mismatch" };
+  }
+
+  return {
+    ok: true,
+    session: toPublicSession(session)
+  };
+}

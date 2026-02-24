@@ -1,0 +1,36 @@
+# dependencies
+node_modules/
+
+# build outputs
+dist/
+coverage/
+.out/
+out/
+
+# env
+.env
+.env.*
+!.env.example
+
+# foundry
+cache/
+broadcast/
+
+# orchestrator runtime
+orchestrator/reports/**/*.json
+!orchestrator/reports/.gitkeep
+!orchestrator/reports/por-history.json
+orchestrator/data/**/*.json
+!orchestrator/data/.gitkeep
+orchestrator/artifacts/
+
+# vite
+.dapp-temp/
+
+# logs
+*.log
+.pids/
+*.pid
+
+# OS
+.DS_Store
