@@ -8,6 +8,7 @@ import {
 } from "@worldcoin/idkit";
 import {
   MiniKit,
+  type MiniKitInstallReturnType,
   type MiniAppVerifyActionPayload,
   VerificationLevel as MiniKitVerificationLevel
 } from "@worldcoin/minikit-js";
@@ -90,6 +91,13 @@ function getWorldIdErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isMiniKitInstallUsable(installResult: MiniKitInstallReturnType): boolean {
+  if (installResult.success) {
+    return true;
+  }
+  return installResult.errorCode === "already_installed";
+}
+
 export default function VerifyPage() {
   const activeAccount = useActiveAccount();
   const walletAddress = activeAccount?.address ?? "";
@@ -153,7 +161,7 @@ export default function VerifyPage() {
 
     try {
       const installResult = MiniKit.install(worldIdConfig.appId);
-      setMiniKitAvailable(installResult.success);
+      setMiniKitAvailable(isMiniKitInstallUsable(installResult));
     } catch {
       setMiniKitAvailable(false);
     }
@@ -218,8 +226,9 @@ export default function VerifyPage() {
     setVerifyingWorldId(true);
     try {
       const installResult = MiniKit.install(worldIdConfig.appId);
-      if (!installResult.success) {
-        throw new Error(`minikit_unavailable: ${installResult.errorCode}`);
+      if (!isMiniKitInstallUsable(installResult)) {
+        const errorCode = installResult.success ? "unknown" : installResult.errorCode;
+        throw new Error(`minikit_unavailable: ${errorCode}`);
       }
       setMiniKitAvailable(true);
 
