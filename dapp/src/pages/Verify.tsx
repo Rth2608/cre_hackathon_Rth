@@ -9,6 +9,7 @@ import {
 import {
   Command,
   MiniKit,
+  ResponseEvent,
   isCommandAvailable,
   type MiniKitInstallReturnType,
   type MiniAppVerifyActionPayload,
@@ -34,6 +35,7 @@ import { isThirdwebClientConfigured, thirdwebClient } from "../lib/thirdweb";
 
 const MODEL_FAMILIES = ["gpt", "gemini", "claude", "grok"] as const;
 type ModelFamily = (typeof MODEL_FAMILIES)[number];
+type MiniVerifyMode = "orb" | "device" | "orb_or_device";
 
 interface WorldIdDebugEntry {
   at: string;
@@ -120,6 +122,37 @@ function readMiniKitRuntimeAppId(): string {
   return (MiniKit.appId ?? "").trim();
 }
 
+function readWorldAppDebugContext(): Record<string, unknown> {
+  if (typeof window === "undefined") {
+    return { available: false };
+  }
+  const worldApp = (window as Window & { WorldApp?: Record<string, unknown> }).WorldApp;
+  if (!worldApp) {
+    return { available: false };
+  }
+
+  const supportedCommands = Array.isArray(worldApp.supported_commands)
+    ? (worldApp.supported_commands as Array<Record<string, unknown>>)
+    : [];
+  const verifyCommand = supportedCommands.find((entry) => entry?.name === "verify");
+  const rawLocation = worldApp.location;
+  let openOrigin: unknown;
+  if (typeof rawLocation === "string") {
+    openOrigin = rawLocation;
+  } else if (typeof rawLocation === "object" && rawLocation && "open_origin" in (rawLocation as Record<string, unknown>)) {
+    openOrigin = (rawLocation as Record<string, unknown>).open_origin;
+  }
+  return {
+    available: true,
+    openOrigin,
+    rawLocation,
+    worldAppVersion: worldApp.world_app_version,
+    deviceOs: worldApp.device_os,
+    verifySupportedVersions: verifyCommand?.supported_versions,
+    miniKitLocation: MiniKit.location ?? null
+  };
+}
+
 function installMiniKitWithAppId(appId: string): MiniKitInstallReturnType {
   const installResult = MiniKit.install(appId);
   if (isMiniKitInstallUsable(installResult) && appId.trim()) {
@@ -179,6 +212,10 @@ function getWorldIdErrorMessage(error: unknown): string {
   if (installErrorMatch) {
     return `MiniKit is unavailable (${installErrorMatch[1]}). Open this page inside World App Mini App and retry.`;
   }
+  const commandUnavailableMatch = message.match(/^minikit_command_unavailable:\s*([a-z0-9_-]+)$/i);
+  if (commandUnavailableMatch) {
+    return `MiniKit command '${commandUnavailableMatch[1]}' is unavailable in this World App runtime. Update World App and reopen this Mini App.`;
+  }
   const appMismatchMatch = message.match(/^world_id_config_mismatch:\s*(.+)$/i);
   if (appMismatchMatch) {
     return `World App runtime appId and deployed env appId differ. ${appMismatchMatch[1]}`;
@@ -196,6 +233,49 @@ function isMiniKitInstallUsable(installResult: MiniKitInstallReturnType): boolea
     return true;
   }
   return installResult.errorCode === "already_installed";
+}
+
+function buildMiniVerifyLevel(
+  mode: MiniVerifyMode
+): MiniKitVerificationLevel | [MiniKitVerificationLevel, MiniKitVerificationLevel] {
+  if (mode === "orb") {
+    return MiniKitVerificationLevel.Orb;
+  }
+  if (mode === "device") {
+    return MiniKitVerificationLevel.Device;
+  }
+  return [MiniKitVerificationLevel.Orb, MiniKitVerificationLevel.Device];
+}
+
+function installMiniKitRawDebugHook(onTrigger: (event: ResponseEvent, payload: unknown) => void): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  const debugWindow = window as Window & {
+    __creMiniKitRawTriggerDebugInstalled?: boolean;
+    __creMiniKitRawTriggerDebugHandler?: (event: ResponseEvent, payload: unknown) => void;
+  };
+  debugWindow.__creMiniKitRawTriggerDebugHandler = onTrigger;
+  if (debugWindow.__creMiniKitRawTriggerDebugInstalled) {
+    return;
+  }
+
+  const originalTrigger = MiniKit.trigger.bind(MiniKit);
+  const miniKitMutable = MiniKit as unknown as {
+    trigger: (event: ResponseEvent, payload: unknown) => void;
+  };
+  miniKitMutable.trigger = (event: ResponseEvent, payload: unknown) => {
+    const currentHandler = debugWindow.__creMiniKitRawTriggerDebugHandler;
+    if (currentHandler) {
+      try {
+        currentHandler(event, payload);
+      } catch {
+        // Avoid breaking command processing due to debug hook errors.
+      }
+    }
+    originalTrigger(event, payload);
+  };
+  debugWindow.__creMiniKitRawTriggerDebugInstalled = true;
 }
 
 export default function VerifyPage() {
@@ -219,7 +299,7 @@ export default function VerifyPage() {
   const [miniKitAvailable, setMiniKitAvailable] = useState(false);
   const [worldIdSession, setWorldIdSession] = useState<WorldIdSession | null>(null);
   const [worldIdDebugLogs, setWorldIdDebugLogs] = useState<WorldIdDebugEntry[]>([]);
-  const [miniVerifyLevel, setMiniVerifyLevel] = useState<MiniKitVerificationLevel>(MiniKitVerificationLevel.Orb);
+  const [miniVerifyMode, setMiniVerifyMode] = useState<MiniVerifyMode>("orb_or_device");
   const [nodeForm, setNodeForm] = useState<{
     selectedModelFamilies: ModelFamily[];
     stakeAmount: string;
@@ -279,6 +359,14 @@ export default function VerifyPage() {
     console.info("[world-id-debug]", event, detail ?? "");
     setWorldIdDebugLogs((prev) => [...prev.slice(-59), entry]);
   };
+
+  useEffect(() => {
+    installMiniKitRawDebugHook((event, payload) => {
+      if (event === "miniapp-verify-action") {
+        appendWorldIdDebugLog("mini.verify.raw_event", payload);
+      }
+    });
+  }, [appendWorldIdDebugLog]);
 
   const worldIdDebugText = useMemo(() => {
     return worldIdDebugLogs
@@ -373,13 +461,16 @@ export default function VerifyPage() {
   };
 
   const onVerifyWorldIdMiniApp = async () => {
+    const requestedVerificationLevel = buildMiniVerifyLevel(miniVerifyMode);
     setRegistrationMessage(null);
     setError(null);
     setWorldIdDebugLogs([]);
     appendWorldIdDebugLog("mini.verify.start", {
       envMiniAppId: worldIdConfig.mini.appId,
       envMiniAction: worldIdConfig.mini.action,
-      selectedVerificationLevel: miniVerifyLevel
+      selectedVerificationMode: miniVerifyMode,
+      requestedVerificationLevel,
+      worldApp: readWorldAppDebugContext()
     });
 
     if (!walletConnected) {
@@ -405,12 +496,19 @@ export default function VerifyPage() {
       }
       setMiniKitAvailable(true);
       const runtimeMiniAppId = readMiniKitRuntimeAppId();
+      const verifyAvailable = isCommandAvailable(Command.Verify);
       appendWorldIdDebugLog("mini.command.availability", {
-        verifyAvailable: isCommandAvailable(Command.Verify),
+        verifyAvailable,
         worldAppVersion: MiniKit.deviceProperties.worldAppVersion,
         deviceOS: MiniKit.deviceProperties.deviceOS
       });
-      appendWorldIdDebugLog("mini.runtime.app_id", { runtimeMiniAppId });
+      appendWorldIdDebugLog("mini.runtime.state", {
+        runtimeMiniAppId,
+        miniKitLocation: MiniKit.location ?? null
+      });
+      if (!verifyAvailable) {
+        throw new Error("minikit_command_unavailable: verify");
+      }
       if (runtimeMiniAppId && worldIdConfig.mini.appId && runtimeMiniAppId !== worldIdConfig.mini.appId) {
         throw new Error(`world_id_config_mismatch: runtime_app_id=${runtimeMiniAppId}, env_app_id=${worldIdConfig.mini.appId}`);
       }
@@ -419,10 +517,13 @@ export default function VerifyPage() {
       const { commandPayload, finalPayload } = await MiniKit.commandsAsync.verify({
         action: worldIdConfig.mini.action,
         signal: walletAddress,
-        verification_level: miniVerifyLevel
+        verification_level: requestedVerificationLevel
       });
       appendWorldIdDebugLog("mini.verify.command_payload", commandPayload ?? null);
-      appendWorldIdDebugLog("mini.verify.final_payload", summarizeMiniKitPayload(finalPayload));
+      appendWorldIdDebugLog(
+        "mini.verify.final_payload",
+        finalPayload.status === "error" ? finalPayload : summarizeMiniKitPayload(finalPayload)
+      );
 
       const proof = buildWorldProofFromMiniKit(finalPayload);
       if (!proof) {
@@ -664,12 +765,13 @@ export default function VerifyPage() {
             <label>
               Mini Level
               <select
-                value={miniVerifyLevel}
-                onChange={(event) => setMiniVerifyLevel(event.target.value as MiniKitVerificationLevel)}
+                value={miniVerifyMode}
+                onChange={(event) => setMiniVerifyMode(event.target.value as MiniVerifyMode)}
                 disabled={verifyingWorldId}
               >
-                <option value={MiniKitVerificationLevel.Orb}>orb</option>
-                <option value={MiniKitVerificationLevel.Device}>device</option>
+                <option value="orb_or_device">orb_or_device (recommended)</option>
+                <option value="orb">orb only</option>
+                <option value="device">device only</option>
               </select>
             </label>
             <button

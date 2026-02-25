@@ -11,36 +11,44 @@ type MiniKitErrorCatalog = Record<MiniKitCommand, Record<string, MiniKitErrorInf
 export const MINI_KIT_ERROR_CATALOG: MiniKitErrorCatalog = {
   verify: {
     verification_rejected: {
-      description: "World App returned a verification rejection for this request.",
-      fix: "Retry verification and make sure the World App approval prompt is completed."
+      description: "User rejected the World ID request in World App.",
+      fix: "If this was a mistake, trigger verify again and complete the World App prompt."
     },
     max_verifications_reached: {
-      description: "The user already hit the maximum verification count for this action.",
-      fix: "This action cannot be verified again for this user."
+      description: "This person already verified for this action the maximum number of times.",
+      fix: "Nothing to do. The user cannot verify this action again."
     },
     credential_unavailable: {
-      description: "The required credential is not available for this user.",
-      fix: "The user needs the required credential (Orb or device path) before retrying."
+      description: "The requested credential is not available for this user.",
+      fix: "The user must complete the required credential flow (Orb or device) in World App."
     },
     malformed_request: {
-      description: "The request payload is invalid or could not be decrypted.",
-      fix: "Check MiniKit setup and verify request parameters."
+      description: "Request payload could not be decrypted or did not conform to the expected format.",
+      fix: "Check MiniKit setup and verify all request parameters."
     },
     invalid_network: {
-      description: "App environment does not match the user client environment.",
-      fix: "Use Simulator for staging apps and World App for production apps."
+      description: "Application environment does not match the verifying user's client environment.",
+      fix: "Use Worldcoin Simulator for staging apps and World App for production apps."
     },
     inclusion_proof_failed: {
-      description: "Credential inclusion proof retrieval failed unexpectedly.",
-      fix: "Retry after a short delay. If it keeps failing, wait and try later or use an alternative verification path."
+      description: "Sequencer returned an unexpected error while retrieving inclusion proof.",
+      fix: "Retry after a short delay. This is often temporary."
     },
     inclusion_proof_pending: {
-      description: "Credential may exist but is not finalized on-chain yet.",
-      fix: "Retry later (around one hour)."
+      description: "Credential may exist but is not available on-chain yet.",
+      fix: "Retry in approximately one hour."
     },
     unexpected_response: {
-      description: "World App returned an unexpected response shape.",
-      fix: "Retry first. If it repeats, report it."
+      description: "Unexpected response was returned from World App.",
+      fix: "Retry once. If it repeats, report the issue."
+    },
+    failed_by_host_app: {
+      description: "Verification was rejected by the host app after proof generation.",
+      fix: "Check backend verification logic and app/action configuration."
+    },
+    connection_failed: {
+      description: "Connection to World App failed while handling verification.",
+      fix: "Retry after confirming network/app connectivity."
     },
     generic_error: {
       description: "An unexpected internal error occurred.",
