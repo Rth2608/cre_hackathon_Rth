@@ -125,14 +125,21 @@ export interface PorStatus {
 }
 
 export interface WorldIdProofInput {
-  merkle_root?: string;
-  nullifier_hash?: string;
-  proof?: string | string[];
-  verification_level?: string;
-  signal_hash?: string;
-  action?: string;
-  responses?: Array<Record<string, unknown>>;
   protocol_version?: string;
+  nonce?: string;
+  signal?: string;
+  max_age?: number;
+  metadata?: Record<string, unknown>;
+  status?: string;
+  created_at?: string;
+  updated_at?: string;
+  responses?: Array<Record<string, unknown>>;
+  result?: Record<string, unknown>;
+  action?: string;
+  nullifier_hash?: string;
+  verification_level?: string;
+  // Keep forward compatibility with additional World ID 4.0 fields.
+  [key: string]: unknown;
 }
 
 export interface WorldIdSession {

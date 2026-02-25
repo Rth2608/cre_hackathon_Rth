@@ -61,6 +61,14 @@ validate_address() {
   fi
 }
 
+address_has_code() {
+  local rpc_url="$1"
+  local contract_address="$2"
+  local code
+  code="$(cast code "$contract_address" --rpc-url "$rpc_url" 2>/dev/null || true)"
+  [[ -n "$code" && "$code" != "0x" && "$code" != "0x0" ]]
+}
+
 normalize_bool() {
   local value="$1"
   case "${value,,}" in
@@ -136,6 +144,8 @@ deploy_contract_with_forge() {
   local deploy_label="$2"
   local deploy_log
   deploy_log="$(mktemp)"
+  local chain_id_for_rpc
+  chain_id_for_rpc="$(cast chain-id --rpc-url "$RPC_URL" 2>/dev/null || true)"
   local -a forge_cmd
   forge_cmd=(
     forge script "$deploy_script"
@@ -157,21 +167,35 @@ deploy_contract_with_forge() {
   popd >/dev/null
 
   local deployed_contract
-  deployed_contract="$(sed -n 's/.*Contract Address:[[:space:]]*\(0x[0-9a-fA-F]\{40\}\).*/\1/p' "$deploy_log" | tail -n1 | xargs)"
-  rm -f "$deploy_log"
+  deployed_contract="$(sed -n -E 's/.*(Contract Address:|Deployed to:)[[:space:]]*(0x[0-9a-fA-F]{40}).*/\2/p' "$deploy_log" | tail -n1 | xargs)"
 
   if [[ -z "$deployed_contract" ]]; then
     local broadcast_script_dir
     broadcast_script_dir="$(basename "${deploy_script%%:*}")"
     local run_latest
-    run_latest="$(find "$CONTRACTS_DIR/broadcast/${broadcast_script_dir}" -type f -name 'run-latest.json' | head -n1)"
+
+    # Prefer the run-latest for the active RPC chain id to avoid mixing addresses
+    # from previous deployments on other networks.
+    if [[ -n "$chain_id_for_rpc" && -f "$CONTRACTS_DIR/broadcast/${broadcast_script_dir}/${chain_id_for_rpc}/run-latest.json" ]]; then
+      run_latest="$CONTRACTS_DIR/broadcast/${broadcast_script_dir}/${chain_id_for_rpc}/run-latest.json"
+    else
+      # Fallback: pick the most recently modified run-latest.json.
+      run_latest="$(
+        find "$CONTRACTS_DIR/broadcast/${broadcast_script_dir}" -type f -name 'run-latest.json' \
+          -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-
+      )"
+    fi
+
     if [[ -z "$run_latest" ]]; then
+      rm -f "$deploy_log"
       echo "Cannot find deployment output for $deploy_script (run-latest.json)." >&2
       exit 1
     fi
+    echo "[redeploy] using broadcast output: $run_latest" >&2
     deployed_contract="$(extract_contract_from_broadcast "$run_latest")"
   fi
 
+  rm -f "$deploy_log"
   require_non_empty "NEW_CONTRACT_ADDRESS" "$deployed_contract"
   validate_address "NEW_CONTRACT_ADDRESS" "$deployed_contract"
   printf '%s' "$deployed_contract"
@@ -215,12 +239,16 @@ fi
 
 if [[ "$DISABLE_OLD_CONTRACT" == "true" && -n "$OLD_CONTRACT_ADDRESS" ]]; then
   validate_address "OLD_CONTRACT_ADDRESS" "$OLD_CONTRACT_ADDRESS"
-  echo "[redeploy] disabling old contract coordinator: $OLD_CONTRACT_ADDRESS"
-  cast send "$OLD_CONTRACT_ADDRESS" "setCoordinator(address)" "$DEAD_COORDINATOR_ADDRESS" \
-    --rpc-url "$RPC_URL" \
-    --private-key "$OLD_OWNER_PRIVATE_KEY" >/dev/null
-  NEW_OLD_COORDINATOR="$(cast call "$OLD_CONTRACT_ADDRESS" "coordinator()(address)" --rpc-url "$RPC_URL")"
-  echo "[redeploy] old coordinator after disable: $NEW_OLD_COORDINATOR"
+  if address_has_code "$RPC_URL" "$OLD_CONTRACT_ADDRESS"; then
+    echo "[redeploy] disabling old contract coordinator: $OLD_CONTRACT_ADDRESS"
+    cast send "$OLD_CONTRACT_ADDRESS" "setCoordinator(address)" "$DEAD_COORDINATOR_ADDRESS" \
+      --rpc-url "$RPC_URL" \
+      --private-key "$OLD_OWNER_PRIVATE_KEY" >/dev/null
+    NEW_OLD_COORDINATOR="$(cast call "$OLD_CONTRACT_ADDRESS" "coordinator()(address)" --rpc-url "$RPC_URL")"
+    echo "[redeploy] old coordinator after disable: $NEW_OLD_COORDINATOR"
+  else
+    echo "[redeploy] skip disabling old contract: no code at $OLD_CONTRACT_ADDRESS on current RPC"
+  fi
 else
   echo "[redeploy] skip disabling old contract (DISABLE_OLD_CONTRACT=$DISABLE_OLD_CONTRACT)"
 fi

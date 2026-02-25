@@ -64,13 +64,37 @@ function formatEndpointHealth(node: RegisteredNode): string {
   return `${node.endpointStatus} (${latency})${error}`;
 }
 
+function looksLikeWorldIdV4ProofPayload(value: Record<string, unknown>): boolean {
+  if (typeof value.protocol_version === "string") {
+    return true;
+  }
+  if (typeof value.nonce === "string") {
+    return true;
+  }
+  if (Array.isArray(value.responses)) {
+    return true;
+  }
+  if (
+    value.result &&
+    typeof value.result === "object" &&
+    !Array.isArray(value.result) &&
+    (
+      typeof (value.result as Record<string, unknown>).proof === "string" ||
+      typeof (value.result as Record<string, unknown>).nullifier_hash === "string"
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function buildWorldProofFromIdKit(result: ISuccessResult): Record<string, unknown> {
-  return {
-    merkle_root: result.merkle_root,
-    nullifier_hash: result.nullifier_hash,
-    proof: result.proof,
-    verification_level: result.verification_level
-  };
+  const rawResult = result as unknown as Record<string, unknown>;
+  if (!looksLikeWorldIdV4ProofPayload(rawResult)) {
+    throw new Error("world_id_v4_payload_required: external_widget_returned_legacy_payload");
+  }
+  // World ID 4.0: forward completion payload as-is to backend verify.
+  return rawResult;
 }
 
 function buildWorldProofFromMiniKit(payload: MiniAppVerifyActionPayload): Record<string, unknown> | null {
@@ -78,35 +102,13 @@ function buildWorldProofFromMiniKit(payload: MiniAppVerifyActionPayload): Record
     return null;
   }
 
-  if ("proof" in payload && typeof payload.proof === "string") {
-    return {
-      merkle_root: payload.merkle_root,
-      nullifier_hash: payload.nullifier_hash,
-      proof: payload.proof,
-      verification_level: payload.verification_level
-    };
-  }
-
-  if ("verifications" in payload && Array.isArray(payload.verifications) && payload.verifications.length > 0) {
-    const selectedVerification =
-      payload.verifications.find((item) => item.verification_level === MiniKitVerificationLevel.Orb) ??
-      payload.verifications[0];
-    return {
-      merkle_root: selectedVerification.merkle_root,
-      nullifier_hash: selectedVerification.nullifier_hash,
-      proof: selectedVerification.proof,
-      verification_level: selectedVerification.verification_level
-    };
+  const rawPayload = payload as unknown as Record<string, unknown>;
+  if (looksLikeWorldIdV4ProofPayload(rawPayload)) {
+    // Forward World ID 4.0-compatible payloads without reshaping.
+    return rawPayload;
   }
 
   return null;
-}
-
-function toMiniKitErrorCode(payload: MiniAppVerifyActionPayload): string {
-  if (payload.status === "error") {
-    return payload.error_code;
-  }
-  return "invalid_miniapp_payload";
 }
 
 function formatDebugDetail(value: unknown): string {
@@ -210,6 +212,9 @@ function summarizeWorldProof(proof: Record<string, unknown>): Record<string, unk
 
 function getWorldIdErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("A verify request is already in flight")) {
+    return "A World ID verification is already in progress. Finish or close the current World App prompt, then retry.";
+  }
   const installErrorMatch = message.match(/^minikit_unavailable:\s*([a-z0-9_]+)$/i);
   if (installErrorMatch) {
     return `MiniKit is unavailable (${installErrorMatch[1]}). Open this page inside World App Mini App and retry.`;
@@ -225,6 +230,10 @@ function getWorldIdErrorMessage(error: unknown): string {
   const appMismatchMatch = message.match(/^world_id_config_mismatch:\s*(.+)$/i);
   if (appMismatchMatch) {
     return `World App runtime appId and deployed env appId differ. ${appMismatchMatch[1]}`;
+  }
+  const v4PayloadRequiredMatch = message.match(/^world_id_v4_payload_required:\s*(.+)$/i);
+  if (v4PayloadRequiredMatch) {
+    return `World ID 4.0 payload is required. Received legacy payload (${v4PayloadRequiredMatch[1]}). Use a World ID 4.0-compatible flow.`;
   }
 
   const normalized = formatKnownMiniKitMessage(message);
@@ -285,21 +294,11 @@ function installMiniKitRawDebugHook(onTrigger: (event: ResponseEvent, payload: u
 }
 
 interface MiniVerifyResult {
-  commandPayload: VerifyCommandPayload;
+  commandPayload: VerifyCommandPayload | null;
   finalPayload: MiniAppVerifyActionPayload;
-  responseChain: MiniAppVerifyActionPayload[];
 }
 
 const MINI_VERIFY_TIMEOUT_MS = 20_000;
-const MINI_VERIFY_AMBIGUOUS_SETTLE_MS = 2_500;
-const MINI_VERIFY_DEFAULT_SETTLE_MS = 50;
-
-function isAmbiguousMiniVerifyError(payload: MiniAppVerifyActionPayload): boolean {
-  if (payload.status !== "error") {
-    return false;
-  }
-  return payload.error_code === "verification_rejected" || payload.error_code === "user_rejected";
-}
 
 function runMiniVerifyCommand(payload: VerifyCommandInput): Promise<MiniVerifyResult> {
   if (typeof window === "undefined") {
@@ -307,70 +306,27 @@ function runMiniVerifyCommand(payload: VerifyCommandInput): Promise<MiniVerifyRe
   }
 
   return new Promise((resolve, reject) => {
-    let commandPayload: VerifyCommandPayload | null = null;
-    const responseChain: MiniAppVerifyActionPayload[] = [];
-    let settleTimer: number | undefined;
-    let timeoutTimer: number | undefined;
-
-    const cleanup = () => {
-      MiniKit.unsubscribe(ResponseEvent.MiniAppVerifyAction);
-      if (settleTimer !== undefined) {
-        window.clearTimeout(settleTimer);
-      }
-      if (timeoutTimer !== undefined) {
-        window.clearTimeout(timeoutTimer);
-      }
-    };
-
-    const finalize = () => {
-      const finalPayload = responseChain[responseChain.length - 1];
-      cleanup();
-      if (!commandPayload) {
-        reject(
-          new Error(
-            "Failed to send verify command. Ensure MiniKit is installed and the verify command is available."
-          )
-        );
-        return;
-      }
-      if (!finalPayload) {
-        reject(new Error("world_id_verify_timeout: no verify response returned from World App."));
-        return;
-      }
-      resolve({
-        commandPayload,
-        finalPayload,
-        responseChain: [...responseChain]
-      });
-    };
-
-    const scheduleFinalize = (delayMs: number) => {
-      if (settleTimer !== undefined) {
-        window.clearTimeout(settleTimer);
-      }
-      settleTimer = window.setTimeout(finalize, delayMs);
-    };
-
-    MiniKit.subscribe(ResponseEvent.MiniAppVerifyAction, (response: MiniAppVerifyActionPayload) => {
-      responseChain.push(response);
-      if (isAmbiguousMiniVerifyError(response)) {
-        scheduleFinalize(MINI_VERIFY_AMBIGUOUS_SETTLE_MS);
-        return;
-      }
-      scheduleFinalize(MINI_VERIFY_DEFAULT_SETTLE_MS);
-    });
-
-    commandPayload = MiniKit.commands.verify(payload);
-    if (!commandPayload) {
-      cleanup();
-      reject(new Error("minikit_command_unavailable: verify"));
-      return;
-    }
-
-    timeoutTimer = window.setTimeout(() => {
-      cleanup();
+    const timeout = window.setTimeout(() => {
       reject(new Error("world_id_verify_timeout: no verify response returned from World App."));
     }, MINI_VERIFY_TIMEOUT_MS);
+    try {
+      MiniKit.commandsAsync
+        .verify(payload)
+        .then(({ commandPayload, finalPayload }) => {
+          window.clearTimeout(timeout);
+          resolve({
+            commandPayload,
+            finalPayload
+          });
+        })
+        .catch((error) => {
+          window.clearTimeout(timeout);
+          reject(error);
+        });
+    } catch (error) {
+      window.clearTimeout(timeout);
+      reject(error);
+    }
   });
 }
 
@@ -539,6 +495,10 @@ export default function VerifyPage() {
       setError("World ID proof JSON is invalid.");
       return;
     }
+    if (!looksLikeWorldIdV4ProofPayload(parsedProof)) {
+      setError("Manual proof must be a World ID 4.0 payload.");
+      return;
+    }
 
     setVerifyingWorldId(true);
     try {
@@ -562,7 +522,6 @@ export default function VerifyPage() {
       appendWorldIdDebugLog("mini.verify.skipped_duplicate_dispatch", { reason: "in_flight" });
       return;
     }
-    miniVerifyInFlightRef.current = true;
 
     const requestedVerificationLevel = buildMiniVerifyLevel(miniVerifyMode);
     setRegistrationMessage(null);
@@ -584,6 +543,7 @@ export default function VerifyPage() {
       setError("Missing mini app World ID config. Set VITE_WORLD_ID_MINI_APP_ID / VITE_WORLD_ID_MINI_ACTION.");
       return;
     }
+    miniVerifyInFlightRef.current = true;
 
     setVerifyingWorldId(true);
     try {
@@ -617,13 +577,15 @@ export default function VerifyPage() {
       }
       const miniAppIdForVerify = runtimeMiniAppId || worldIdConfig.mini.appId;
 
-      const { commandPayload, finalPayload, responseChain } = await runMiniVerifyCommand({
+      const { commandPayload, finalPayload } = await runMiniVerifyCommand({
         action: worldIdConfig.mini.action,
         signal: walletAddress,
         verification_level: requestedVerificationLevel
       });
-      appendWorldIdDebugLog("mini.verify.command_payload", commandPayload ?? null);
-      appendWorldIdDebugLog("mini.verify.response_chain", responseChain);
+      if (!commandPayload) {
+        throw new Error("minikit_command_unavailable: verify");
+      }
+      appendWorldIdDebugLog("mini.verify.command_payload", commandPayload);
       appendWorldIdDebugLog(
         "mini.verify.final_payload",
         finalPayload.status === "error" ? finalPayload : summarizeMiniKitPayload(finalPayload)
@@ -631,7 +593,7 @@ export default function VerifyPage() {
 
       const proof = buildWorldProofFromMiniKit(finalPayload);
       if (!proof) {
-        throw new Error(`world_id_verify_failed: ${toMiniKitErrorCode(finalPayload)}`);
+        throw new Error("world_id_v4_payload_required: miniapp_returned_legacy_payload");
       }
 
       await verifyWorldIdWithProof({
@@ -924,7 +886,7 @@ export default function VerifyPage() {
                 value={worldProofJson}
                 onChange={(event) => setWorldProofJson(event.target.value)}
                 rows={7}
-                placeholder='{"merkle_root":"0x...","nullifier_hash":"0x...","proof":"0x...","verification_level":"device"}'
+                placeholder='{"protocol_version":"4.0","action":"prediction_market_cre_demo","responses":[{"nullifier_hash":"0x...","proof":"0x...","verification_level":"device"}]}'
               />
             </label>
             <div className="action-row">

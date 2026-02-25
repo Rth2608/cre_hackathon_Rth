@@ -106,6 +106,8 @@ Use this to get the `VITE_API_BASE_URL` value for Vercel.
    - `WORLD_ID_APP_ID`
    - `WORLD_ID_ACTION`
    - `ASSUME_WORLD_ID_VERIFIED=false`
+   - `WORLD_ID_VERIFY_API_V4_BASE_URL=https://developer.world.org/api/v4/verify`
+   - `WORLD_ID_RP_ID=<rp_xxx (required for v4 payload verify)>`
 6. For cloud demo stability (no local worker dependency), also set:
    - `DON_DISTRIBUTED_MODE=false`
    - `NODE_ENDPOINT_VERIFY_ENABLED=false`
@@ -272,7 +274,8 @@ The orchestrator reads chain settings from `orchestrator/.env`:
 - `DON_ENDPOINT_BUNDLE_SIGNING_ENABLED` (default `true`, collect bundle signatures from workers)
 - `WORLD_ID_APP_ID` (required when `ASSUME_WORLD_ID_VERIFIED=false`)
 - `WORLD_ID_ACTION` (required when `ASSUME_WORLD_ID_VERIFIED=false`)
-- `WORLD_ID_VERIFY_API_BASE_URL` (default `https://developer.worldcoin.org/api/v2/verify`)
+- `WORLD_ID_VERIFY_API_V4_BASE_URL` (default `https://developer.world.org/api/v4/verify`)
+- `WORLD_ID_RP_ID` (v4 route id, e.g. `rp_xxx`; required for strict World ID 4.0 verify path)
 - `WORLD_ID_VERIFY_TIMEOUT_MS` (default `8000`)
 - `WORLD_ID_SESSION_TTL_SECONDS` (default `86400`)
 - `ONCHAIN_READ_ENABLED` (default `true`, read requests/nodes from contract events)

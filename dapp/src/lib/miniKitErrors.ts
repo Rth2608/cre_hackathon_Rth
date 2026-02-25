@@ -10,6 +10,10 @@ type MiniKitErrorCatalog = Record<MiniKitCommand, Record<string, MiniKitErrorInf
 // Based on https://docs.world.org/mini-apps/reference/errors
 export const MINI_KIT_ERROR_CATALOG: MiniKitErrorCatalog = {
   verify: {
+    user_rejected: {
+      description: "User rejected the World ID request in World App.",
+      fix: "If this was a mistake, trigger verify again and complete the World App prompt."
+    },
     verification_rejected: {
       description: "User rejected the World ID request in World App.",
       fix: "If this was a mistake, trigger verify again and complete the World App prompt."
