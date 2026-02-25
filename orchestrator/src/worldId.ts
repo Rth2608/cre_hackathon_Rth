@@ -2,7 +2,8 @@ import { randomBytes } from "node:crypto";
 import { getAddress } from "ethers";
 import { ensureDir, nowIso, readJsonFile, resolveProjectPath, writeJsonFileAtomic } from "./utils";
 
-const DEFAULT_WORLD_ID_VERIFY_API_BASE = "https://developer.worldcoin.org/api/v2/verify";
+const DEFAULT_WORLD_ID_VERIFY_API_V2_BASE = "https://developer.worldcoin.org/api/v2/verify";
+const DEFAULT_WORLD_ID_VERIFY_API_V4_BASE = "https://developer.world.org/api/v4/verify";
 const WORLD_ID_DB_PATH = resolveProjectPath("data", "world-id-sessions.json");
 
 interface WorldIdSessionDbSchema {
@@ -50,9 +51,18 @@ export interface WorldIdProofInput {
   // IDKit result payload fallback
   responses?: unknown;
   protocol_version?: unknown;
+  nonce?: unknown;
+  signal?: unknown;
+  max_age?: unknown;
+  metadata?: unknown;
+  status?: unknown;
+  created_at?: unknown;
+  updated_at?: unknown;
+  result?: unknown;
 }
 
-interface ParsedWorldIdProofPayload {
+interface ParsedWorldIdLegacyProofPayload {
+  kind: "legacy";
   merkleRoot: string;
   nullifierHash: string;
   proof: string | string[];
@@ -60,6 +70,17 @@ interface ParsedWorldIdProofPayload {
   signalHash?: string;
   action?: string;
 }
+
+interface ParsedWorldIdV4ProofPayload {
+  kind: "v4";
+  rawPayload: Record<string, unknown>;
+  nullifierHash: string;
+  verificationLevel?: string;
+  action?: string;
+  legacyFallback: ParsedWorldIdLegacyProofPayload | null;
+}
+
+type ParsedWorldIdProofPayload = ParsedWorldIdLegacyProofPayload | ParsedWorldIdV4ProofPayload;
 
 export type WorldIdClientSource = "miniapp" | "external" | "manual";
 
@@ -135,7 +156,21 @@ function normalizeProofArray(value: unknown): string[] | null {
   return proofItems;
 }
 
-function parseWorldIdProof(rawInput: WorldIdProofInput): ParsedWorldIdProofPayload {
+function toRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function readFirstResponseRecord(value: unknown): Record<string, unknown> | null {
+  if (!Array.isArray(value) || value.length === 0) {
+    return null;
+  }
+  return toRecord(value[0]);
+}
+
+function parseLegacyWorldIdProof(rawInput: WorldIdProofInput): ParsedWorldIdLegacyProofPayload {
   const directMerkleRoot = toTrimmedString(rawInput.merkle_root);
   const directNullifierHash = toTrimmedString(rawInput.nullifier_hash);
   const directVerificationLevel = toTrimmedString(rawInput.verification_level);
@@ -170,6 +205,7 @@ function parseWorldIdProof(rawInput: WorldIdProofInput): ParsedWorldIdProofPaylo
   if (typeof proofValue === "string" && proofValue.trim().length > 0) {
     const normalizedProof = proofValue.trim();
     return {
+      kind: "legacy",
       merkleRoot: normalizeHexStringMaybe(merkleRoot) ?? "",
       nullifierHash: normalizeHexStringMaybe(nullifierHash) ?? "",
       proof: normalizedProof,
@@ -185,6 +221,7 @@ function parseWorldIdProof(rawInput: WorldIdProofInput): ParsedWorldIdProofPaylo
     const derivedMerkleRoot =
       merkleRoot ?? (proofArray.length >= 5 ? normalizeHexStringMaybe(proofArray[4]) : undefined);
     return {
+      kind: "legacy",
       merkleRoot: derivedMerkleRoot ?? "",
       nullifierHash: normalizeHexStringMaybe(nullifierHash) ?? "",
       proof: proofArray,
@@ -197,15 +234,103 @@ function parseWorldIdProof(rawInput: WorldIdProofInput): ParsedWorldIdProofPaylo
   throw new Error("invalid_world_id_proof_shape");
 }
 
-function assertParsedProofValid(payload: ParsedWorldIdProofPayload): void {
-  if (!payload.merkleRoot) {
-    throw new Error("missing_merkle_root");
+function looksLikeWorldIdV4Payload(raw: Record<string, unknown>): boolean {
+  if (typeof raw.protocol_version === "string") {
+    return true;
   }
+  if (typeof raw.nonce === "string") {
+    return true;
+  }
+  if (typeof raw.status === "string") {
+    return true;
+  }
+  if (Array.isArray(raw.responses)) {
+    return true;
+  }
+  const result = toRecord(raw.result);
+  if (!result) {
+    return false;
+  }
+  return Boolean(toTrimmedString(result.proof) || toTrimmedString(result.nullifier_hash) || toTrimmedString(result.merkle_root));
+}
+
+function buildLegacyFallbackFromV4(raw: Record<string, unknown>): ParsedWorldIdLegacyProofPayload | null {
+  const result = toRecord(raw.result);
+  const firstResponse = readFirstResponseRecord(raw.responses);
+
+  try {
+    return parseLegacyWorldIdProof({
+      merkle_root: raw.merkle_root ?? result?.merkle_root ?? firstResponse?.merkle_root,
+      nullifier_hash:
+        raw.nullifier_hash ??
+        result?.nullifier_hash ??
+        firstResponse?.nullifier_hash ??
+        firstResponse?.nullifier,
+      proof: raw.proof ?? result?.proof ?? firstResponse?.proof,
+      verification_level:
+        raw.verification_level ?? result?.verification_level ?? firstResponse?.verification_level,
+      signal_hash: raw.signal_hash ?? firstResponse?.signal_hash,
+      action: raw.action
+    });
+  } catch {
+    return null;
+  }
+}
+
+function parseWorldIdV4Proof(rawInput: WorldIdProofInput): ParsedWorldIdV4ProofPayload | null {
+  const rootRecord = toRecord(rawInput);
+  if (!rootRecord) {
+    return null;
+  }
+
+  const nestedResult = toRecord(rootRecord.result);
+  const v4Record =
+    looksLikeWorldIdV4Payload(rootRecord) ? rootRecord : nestedResult && looksLikeWorldIdV4Payload(nestedResult) ? nestedResult : null;
+
+  if (!v4Record) {
+    return null;
+  }
+
+  const result = toRecord(v4Record.result);
+  const firstResponse = readFirstResponseRecord(v4Record.responses);
+
+  const nullifierHash = normalizeHexStringMaybe(
+    toTrimmedString(v4Record.nullifier_hash) ??
+      toTrimmedString(result?.nullifier_hash) ??
+      toTrimmedString(firstResponse?.nullifier_hash) ??
+      toTrimmedString(firstResponse?.nullifier)
+  );
+  const verificationLevel =
+    toTrimmedString(v4Record.verification_level) ??
+    toTrimmedString(result?.verification_level) ??
+    toTrimmedString(firstResponse?.verification_level);
+  const action = toTrimmedString(v4Record.action);
+
+  return {
+    kind: "v4",
+    rawPayload: v4Record,
+    nullifierHash: nullifierHash ?? "",
+    verificationLevel,
+    action,
+    legacyFallback: buildLegacyFallbackFromV4(v4Record)
+  };
+}
+
+function parseWorldIdProof(rawInput: WorldIdProofInput): ParsedWorldIdProofPayload {
+  return parseWorldIdV4Proof(rawInput) ?? parseLegacyWorldIdProof(rawInput);
+}
+
+function assertParsedProofValid(payload: ParsedWorldIdProofPayload): void {
   if (!payload.nullifierHash) {
     throw new Error("missing_nullifier_hash");
   }
-  if (!payload.proof) {
-    throw new Error("missing_proof");
+  if (payload.kind === "legacy") {
+    if (!payload.merkleRoot) {
+      throw new Error("missing_merkle_root");
+    }
+    if (!payload.proof) {
+      throw new Error("missing_proof");
+    }
   }
 }
 
@@ -327,8 +452,20 @@ function resolveRequestedProfile(input: {
   return candidates[0];
 }
 
-function resolveWorldIdVerifyApiBase(): string {
-  return (process.env.WORLD_ID_VERIFY_API_BASE_URL?.trim() ?? DEFAULT_WORLD_ID_VERIFY_API_BASE).replace(/\/$/, "");
+function resolveWorldIdVerifyApiV2Base(): string {
+  return (process.env.WORLD_ID_VERIFY_API_BASE_URL?.trim() ?? DEFAULT_WORLD_ID_VERIFY_API_V2_BASE).replace(/\/$/, "");
+}
+
+function resolveWorldIdVerifyApiV4Base(): string {
+  return (process.env.WORLD_ID_VERIFY_API_V4_BASE_URL?.trim() ?? DEFAULT_WORLD_ID_VERIFY_API_V4_BASE).replace(/\/$/, "");
+}
+
+function resolveWorldIdVerifyV4RouteId(defaultAppId: string): string {
+  return process.env.WORLD_ID_RP_ID?.trim() || defaultAppId;
+}
+
+function resolveWorldIdV4FallbackToV2Enabled(): boolean {
+  return parseBooleanEnv(process.env.WORLD_ID_V4_FALLBACK_TO_V2, true);
 }
 
 function resolveWorldIdRequestTimeoutMs(): number {
@@ -433,38 +570,19 @@ async function loadDbWithPrune(): Promise<WorldIdSessionDbSchema> {
   return db;
 }
 
-async function verifyWithWorldCloud(input: {
-  appId: string;
-  expectedAction: string;
-  proofPayload: ParsedWorldIdProofPayload;
-}): Promise<VerifyApiResult> {
+async function runWorldVerifyRequest(input: { verifyUrl: string; requestBody: Record<string, unknown> }): Promise<VerifyApiResult> {
   const timeoutMs = resolveWorldIdRequestTimeoutMs();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-  const requestBody: Record<string, unknown> = {
-    merkle_root: input.proofPayload.merkleRoot,
-    nullifier_hash: input.proofPayload.nullifierHash,
-    proof: input.proofPayload.proof,
-    action: input.expectedAction
-  };
-  if (input.proofPayload.signalHash) {
-    requestBody.signal_hash = input.proofPayload.signalHash;
-  }
-  if (input.proofPayload.verificationLevel) {
-    requestBody.verification_level = input.proofPayload.verificationLevel;
-  }
-
-  const verifyUrl = `${resolveWorldIdVerifyApiBase()}/${input.appId}`;
-
   try {
-    const response = await fetch(verifyUrl, {
+    const response = await fetch(input.verifyUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "User-Agent": "cre-don-world-id-demo/1.0"
       },
-      body: JSON.stringify(requestBody),
+      body: JSON.stringify(input.requestBody),
       signal: controller.signal
     });
 
@@ -484,6 +602,74 @@ async function verifyWithWorldCloud(input: {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function verifyWithWorldCloudV2(input: {
+  appId: string;
+  expectedAction: string;
+  proofPayload: ParsedWorldIdLegacyProofPayload;
+}): Promise<VerifyApiResult> {
+  const requestBody: Record<string, unknown> = {
+    merkle_root: input.proofPayload.merkleRoot,
+    nullifier_hash: input.proofPayload.nullifierHash,
+    proof: input.proofPayload.proof,
+    action: input.expectedAction
+  };
+  if (input.proofPayload.signalHash) {
+    requestBody.signal_hash = input.proofPayload.signalHash;
+  }
+  if (input.proofPayload.verificationLevel) {
+    requestBody.verification_level = input.proofPayload.verificationLevel;
+  }
+
+  const verifyUrl = `${resolveWorldIdVerifyApiV2Base()}/${input.appId}`;
+  return runWorldVerifyRequest({
+    verifyUrl,
+    requestBody
+  });
+}
+
+async function verifyWithWorldCloudV4(input: {
+  routeId: string;
+  proofPayload: ParsedWorldIdV4ProofPayload;
+}): Promise<VerifyApiResult> {
+  const verifyUrl = `${resolveWorldIdVerifyApiV4Base()}/${input.routeId}`;
+  return runWorldVerifyRequest({
+    verifyUrl,
+    requestBody: input.proofPayload.rawPayload
+  });
+}
+
+async function verifyWithWorldCloud(input: {
+  appId: string;
+  expectedAction: string;
+  proofPayload: ParsedWorldIdProofPayload;
+}): Promise<VerifyApiResult> {
+  if (input.proofPayload.kind === "legacy") {
+    return verifyWithWorldCloudV2({
+      appId: input.appId,
+      expectedAction: input.expectedAction,
+      proofPayload: input.proofPayload
+    });
+  }
+
+  const primaryResult = await verifyWithWorldCloudV4({
+    routeId: resolveWorldIdVerifyV4RouteId(input.appId),
+    proofPayload: input.proofPayload
+  });
+  if (primaryResult.ok) {
+    return primaryResult;
+  }
+
+  if (!resolveWorldIdV4FallbackToV2Enabled() || !input.proofPayload.legacyFallback) {
+    return primaryResult;
+  }
+
+  return verifyWithWorldCloudV2({
+    appId: input.appId,
+    expectedAction: input.expectedAction,
+    proofPayload: input.proofPayload.legacyFallback
+  });
 }
 
 function buildSession(input: {
