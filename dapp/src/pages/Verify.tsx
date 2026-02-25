@@ -31,10 +31,7 @@ import { isThirdwebClientConfigured, thirdwebClient } from "../lib/thirdweb";
 
 const MODEL_FAMILIES = ["gpt", "gemini", "claude", "grok"] as const;
 type ModelFamily = (typeof MODEL_FAMILIES)[number];
-const MINI_APP_VERIFICATION_LEVELS: [MiniKitVerificationLevel, MiniKitVerificationLevel] = [
-  MiniKitVerificationLevel.Orb,
-  MiniKitVerificationLevel.Device
-];
+const MINI_APP_RETRYABLE_ERROR_CODES = new Set(["inclusion_proof_failed", "inclusion_proof_pending"]);
 
 function buildNodeHeartbeatMessage(input: { walletAddress: string; endpointUrl: string; timestamp: number }): string {
   return [
@@ -91,6 +88,13 @@ function buildWorldProofFromMiniKit(payload: MiniAppVerifyActionPayload): Record
   }
 
   return null;
+}
+
+function toMiniKitErrorCode(payload: MiniAppVerifyActionPayload): string {
+  if (payload.status === "error") {
+    return payload.error_code;
+  }
+  return "invalid_miniapp_payload";
 }
 
 function getWorldIdErrorMessage(error: unknown): string {
@@ -254,18 +258,28 @@ export default function VerifyPage() {
       }
       setMiniKitAvailable(true);
 
-      const { finalPayload } = await MiniKit.commandsAsync.verify({
+      const { finalPayload: orbPayload } = await MiniKit.commandsAsync.verify({
         action: worldIdConfig.mini.action,
         signal: walletAddress,
-        verification_level: MINI_APP_VERIFICATION_LEVELS
+        verification_level: MiniKitVerificationLevel.Orb
       });
 
-      const proof = buildWorldProofFromMiniKit(finalPayload);
+      let proof = buildWorldProofFromMiniKit(orbPayload);
       if (!proof) {
-        if (finalPayload.status === "error") {
-          throw new Error(`world_id_verify_failed: ${finalPayload.error_code}`);
+        const orbErrorCode = toMiniKitErrorCode(orbPayload);
+        if (!MINI_APP_RETRYABLE_ERROR_CODES.has(orbErrorCode)) {
+          throw new Error(`world_id_verify_failed: ${orbErrorCode}`);
         }
-        throw new Error("world_id_verify_failed: invalid_miniapp_payload");
+
+        const { finalPayload: devicePayload } = await MiniKit.commandsAsync.verify({
+          action: worldIdConfig.mini.action,
+          signal: walletAddress,
+          verification_level: MiniKitVerificationLevel.Device
+        });
+        proof = buildWorldProofFromMiniKit(devicePayload);
+        if (!proof) {
+          throw new Error(`world_id_verify_failed: ${toMiniKitErrorCode(devicePayload)}`);
+        }
       }
 
       await verifyWorldIdWithProof({
