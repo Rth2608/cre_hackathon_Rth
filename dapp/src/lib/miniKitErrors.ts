@@ -32,7 +32,7 @@ export const MINI_KIT_ERROR_CATALOG: MiniKitErrorCatalog = {
     },
     inclusion_proof_failed: {
       description: "Credential inclusion proof retrieval failed unexpectedly.",
-      fix: "Retry after a short delay; this is often temporary."
+      fix: "Retry after a short delay. If it keeps failing, wait and try later or use an alternative verification path."
     },
     inclusion_proof_pending: {
       description: "Credential may exist but is not finalized on-chain yet.",

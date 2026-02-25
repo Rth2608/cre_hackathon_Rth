@@ -32,6 +32,9 @@ import { isThirdwebClientConfigured, thirdwebClient } from "../lib/thirdweb";
 
 const MODEL_FAMILIES = ["gpt", "gemini", "claude", "grok"] as const;
 type ModelFamily = (typeof MODEL_FAMILIES)[number];
+const MINI_KIT_VERIFY_RETRYABLE_TRANSIENT_CODES = new Set(["inclusion_proof_failed"]);
+const MINI_KIT_VERIFY_MAX_RETRIES = 2;
+const MINI_KIT_VERIFY_BASE_RETRY_DELAY_MS = 1200;
 
 function buildNodeHeartbeatMessage(input: { walletAddress: string; endpointUrl: string; timestamp: number }): string {
   return [
@@ -95,6 +98,39 @@ function toMiniKitErrorCode(payload: MiniAppVerifyActionPayload): string {
     return payload.error_code;
   }
   return "invalid_miniapp_payload";
+}
+
+function waitMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function runMiniKitVerifyWithRetry(input: {
+  action: string;
+  signal: string;
+  verificationLevel: MiniKitVerificationLevel;
+}): Promise<MiniAppVerifyActionPayload> {
+  for (let attempt = 0; attempt <= MINI_KIT_VERIFY_MAX_RETRIES; attempt += 1) {
+    const { finalPayload } = await MiniKit.commandsAsync.verify({
+      action: input.action,
+      signal: input.signal,
+      verification_level: input.verificationLevel
+    });
+    if (finalPayload.status !== "error") {
+      return finalPayload;
+    }
+
+    const errorCode = toMiniKitErrorCode(finalPayload);
+    const shouldRetry =
+      MINI_KIT_VERIFY_RETRYABLE_TRANSIENT_CODES.has(errorCode) && attempt < MINI_KIT_VERIFY_MAX_RETRIES;
+    if (!shouldRetry) {
+      return finalPayload;
+    }
+
+    const delayMs = MINI_KIT_VERIFY_BASE_RETRY_DELAY_MS * (attempt + 1);
+    await waitMs(delayMs);
+  }
+
+  throw new Error("world_id_verify_failed: retry_exhausted");
 }
 
 function getWorldIdErrorMessage(error: unknown): string {
@@ -268,10 +304,10 @@ export default function VerifyPage() {
       }
       setMiniKitAvailable(true);
 
-      const { finalPayload: orbPayload } = await MiniKit.commandsAsync.verify({
+      const orbPayload = await runMiniKitVerifyWithRetry({
         action: worldIdConfig.mini.action,
         signal: walletAddress,
-        verification_level: MiniKitVerificationLevel.Orb
+        verificationLevel: MiniKitVerificationLevel.Orb
       });
 
       let proof = buildWorldProofFromMiniKit(orbPayload);
@@ -281,10 +317,10 @@ export default function VerifyPage() {
           throw new Error(`world_id_verify_failed: ${orbErrorCode}`);
         }
 
-        const { finalPayload: devicePayload } = await MiniKit.commandsAsync.verify({
+        const devicePayload = await runMiniKitVerifyWithRetry({
           action: worldIdConfig.mini.action,
           signal: walletAddress,
-          verification_level: MiniKitVerificationLevel.Device
+          verificationLevel: MiniKitVerificationLevel.Device
         });
         proof = buildWorldProofFromMiniKit(devicePayload);
         if (!proof) {
