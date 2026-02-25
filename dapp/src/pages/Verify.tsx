@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   IDKitWidget,
@@ -396,6 +396,7 @@ export default function VerifyPage() {
   const [worldIdSession, setWorldIdSession] = useState<WorldIdSession | null>(null);
   const [worldIdDebugLogs, setWorldIdDebugLogs] = useState<WorldIdDebugEntry[]>([]);
   const [miniVerifyMode, setMiniVerifyMode] = useState<MiniVerifyMode>("orb_or_device");
+  const miniVerifyInFlightRef = useRef(false);
   const [nodeForm, setNodeForm] = useState<{
     selectedModelFamilies: ModelFamily[];
     stakeAmount: string;
@@ -557,6 +558,12 @@ export default function VerifyPage() {
   };
 
   const onVerifyWorldIdMiniApp = async () => {
+    if (miniVerifyInFlightRef.current) {
+      appendWorldIdDebugLog("mini.verify.skipped_duplicate_dispatch", { reason: "in_flight" });
+      return;
+    }
+    miniVerifyInFlightRef.current = true;
+
     const requestedVerificationLevel = buildMiniVerifyLevel(miniVerifyMode);
     setRegistrationMessage(null);
     setError(null);
@@ -641,6 +648,7 @@ export default function VerifyPage() {
       });
       setError(getWorldIdErrorMessage(err));
     } finally {
+      miniVerifyInFlightRef.current = false;
       setVerifyingWorldId(false);
     }
   };
