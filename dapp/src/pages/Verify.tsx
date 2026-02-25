@@ -26,12 +26,12 @@ import {
   type RequestRecord,
   type WorldIdSession
 } from "../lib/api";
+import { MINI_KIT_VERIFY_DEVICE_FALLBACK_CODES, formatKnownMiniKitMessage } from "../lib/miniKitErrors";
 import { clearWorldIdSession, getWorldIdConfig, loadWorldIdSession, saveWorldIdSession } from "../lib/worldId";
 import { isThirdwebClientConfigured, thirdwebClient } from "../lib/thirdweb";
 
 const MODEL_FAMILIES = ["gpt", "gemini", "claude", "grok"] as const;
 type ModelFamily = (typeof MODEL_FAMILIES)[number];
-const MINI_APP_RETRYABLE_ERROR_CODES = new Set(["inclusion_proof_failed", "inclusion_proof_pending"]);
 
 function buildNodeHeartbeatMessage(input: { walletAddress: string; endpointUrl: string; timestamp: number }): string {
   return [
@@ -98,7 +98,17 @@ function toMiniKitErrorCode(payload: MiniAppVerifyActionPayload): string {
 }
 
 function getWorldIdErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  const message = error instanceof Error ? error.message : String(error);
+  const installErrorMatch = message.match(/^minikit_unavailable:\s*([a-z0-9_]+)$/i);
+  if (installErrorMatch) {
+    return `MiniKit is unavailable (${installErrorMatch[1]}). Open this page inside World App Mini App and retry.`;
+  }
+
+  const normalized = formatKnownMiniKitMessage(message);
+  if (normalized) {
+    return normalized;
+  }
+  return message;
 }
 
 function isMiniKitInstallUsable(installResult: MiniKitInstallReturnType): boolean {
@@ -267,7 +277,7 @@ export default function VerifyPage() {
       let proof = buildWorldProofFromMiniKit(orbPayload);
       if (!proof) {
         const orbErrorCode = toMiniKitErrorCode(orbPayload);
-        if (!MINI_APP_RETRYABLE_ERROR_CODES.has(orbErrorCode)) {
+        if (!MINI_KIT_VERIFY_DEVICE_FALLBACK_CODES.has(orbErrorCode)) {
           throw new Error(`world_id_verify_failed: ${orbErrorCode}`);
         }
 
