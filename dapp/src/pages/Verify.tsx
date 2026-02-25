@@ -7,7 +7,9 @@ import {
   VerificationLevel as IDKitVerificationLevel
 } from "@worldcoin/idkit";
 import {
+  Command,
   MiniKit,
+  isCommandAvailable,
   type MiniKitInstallReturnType,
   type MiniAppVerifyActionPayload,
   VerificationLevel as MiniKitVerificationLevel
@@ -26,15 +28,18 @@ import {
   type RequestRecord,
   type WorldIdSession
 } from "../lib/api";
-import { MINI_KIT_VERIFY_DEVICE_FALLBACK_CODES, formatKnownMiniKitMessage } from "../lib/miniKitErrors";
+import { formatKnownMiniKitMessage } from "../lib/miniKitErrors";
 import { clearWorldIdSession, getWorldIdConfig, loadWorldIdSession, saveWorldIdSession } from "../lib/worldId";
 import { isThirdwebClientConfigured, thirdwebClient } from "../lib/thirdweb";
 
 const MODEL_FAMILIES = ["gpt", "gemini", "claude", "grok"] as const;
 type ModelFamily = (typeof MODEL_FAMILIES)[number];
-const MINI_KIT_VERIFY_RETRYABLE_TRANSIENT_CODES = new Set(["inclusion_proof_failed"]);
-const MINI_KIT_VERIFY_MAX_RETRIES = 2;
-const MINI_KIT_VERIFY_BASE_RETRY_DELAY_MS = 1200;
+
+interface WorldIdDebugEntry {
+  at: string;
+  event: string;
+  detail?: string;
+}
 
 function buildNodeHeartbeatMessage(input: { walletAddress: string; endpointUrl: string; timestamp: number }): string {
   return [
@@ -100,41 +105,61 @@ function toMiniKitErrorCode(payload: MiniAppVerifyActionPayload): string {
   return "invalid_miniapp_payload";
 }
 
-function waitMs(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function formatDebugDetail(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 function readMiniKitRuntimeAppId(): string {
   return (MiniKit.appId ?? "").trim();
 }
 
-async function runMiniKitVerifyWithRetry(input: {
-  action: string;
-  signal: string;
-  verificationLevel: MiniKitVerificationLevel;
-}): Promise<MiniAppVerifyActionPayload> {
-  for (let attempt = 0; attempt <= MINI_KIT_VERIFY_MAX_RETRIES; attempt += 1) {
-    const { finalPayload } = await MiniKit.commandsAsync.verify({
-      action: input.action,
-      signal: input.signal,
-      verification_level: input.verificationLevel
-    });
-    if (finalPayload.status !== "error") {
-      return finalPayload;
-    }
-
-    const errorCode = toMiniKitErrorCode(finalPayload);
-    const shouldRetry =
-      MINI_KIT_VERIFY_RETRYABLE_TRANSIENT_CODES.has(errorCode) && attempt < MINI_KIT_VERIFY_MAX_RETRIES;
-    if (!shouldRetry) {
-      return finalPayload;
-    }
-
-    const delayMs = MINI_KIT_VERIFY_BASE_RETRY_DELAY_MS * (attempt + 1);
-    await waitMs(delayMs);
+function summarizeMiniKitPayload(payload: MiniAppVerifyActionPayload): Record<string, unknown> {
+  if (payload.status === "error") {
+    return {
+      status: payload.status,
+      errorCode: payload.error_code
+    };
   }
 
-  throw new Error("world_id_verify_failed: retry_exhausted");
+  if ("verification_level" in payload) {
+    return {
+      status: payload.status,
+      verificationLevel: payload.verification_level
+    };
+  }
+
+  if ("verifications" in payload) {
+    return {
+      status: payload.status,
+      verificationLevels: payload.verifications.map((item) => item.verification_level),
+      verificationCount: payload.verifications.length
+    };
+  }
+
+  return { status: "unknown" };
+}
+
+function summarizeWorldProof(proof: Record<string, unknown>): Record<string, unknown> {
+  const proofValue = proof.proof;
+  return {
+    verificationLevel: proof.verification_level,
+    hasMerkleRoot: typeof proof.merkle_root === "string" && proof.merkle_root.length > 0,
+    hasNullifierHash: typeof proof.nullifier_hash === "string" && proof.nullifier_hash.length > 0,
+    proofType: Array.isArray(proofValue) ? "array" : typeof proofValue,
+    proofLength:
+      typeof proofValue === "string"
+        ? proofValue.length
+        : Array.isArray(proofValue)
+          ? proofValue.length
+          : undefined
+  };
 }
 
 function getWorldIdErrorMessage(error: unknown): string {
@@ -182,6 +207,8 @@ export default function VerifyPage() {
   const [worldProofJson, setWorldProofJson] = useState("");
   const [miniKitAvailable, setMiniKitAvailable] = useState(false);
   const [worldIdSession, setWorldIdSession] = useState<WorldIdSession | null>(null);
+  const [worldIdDebugLogs, setWorldIdDebugLogs] = useState<WorldIdDebugEntry[]>([]);
+  const [miniVerifyLevel, setMiniVerifyLevel] = useState<MiniKitVerificationLevel>(MiniKitVerificationLevel.Orb);
   const [nodeForm, setNodeForm] = useState<{
     selectedModelFamilies: ModelFamily[];
     stakeAmount: string;
@@ -232,6 +259,22 @@ export default function VerifyPage() {
     }
   }, [walletConnected, miniWorldIdConfigured]);
 
+  const appendWorldIdDebugLog = (event: string, detail?: unknown) => {
+    const entry: WorldIdDebugEntry = {
+      at: new Date().toISOString(),
+      event,
+      detail: detail === undefined ? undefined : formatDebugDetail(detail)
+    };
+    console.info("[world-id-debug]", event, detail ?? "");
+    setWorldIdDebugLogs((prev) => [...prev.slice(-59), entry]);
+  };
+
+  const worldIdDebugText = useMemo(() => {
+    return worldIdDebugLogs
+      .map((entry) => (entry.detail ? `${entry.at} ${entry.event} ${entry.detail}` : `${entry.at} ${entry.event}`))
+      .join("\n");
+  }, [worldIdDebugLogs]);
+
   const verifyWorldIdWithProof = async (input: {
     proof: Record<string, unknown>;
     sourceLabel: string;
@@ -239,23 +282,49 @@ export default function VerifyPage() {
     action: string;
     clientSource: "miniapp" | "external" | "manual";
   }) => {
-    const result = await verifyWorldIdForWallet({
-      walletAddress,
-      proof: input.proof,
+    appendWorldIdDebugLog("backend.verify.request", {
+      source: input.sourceLabel,
       appId: input.appId,
       action: input.action,
-      clientSource: input.clientSource
+      clientSource: input.clientSource,
+      proof: summarizeWorldProof(input.proof)
     });
-    saveWorldIdSession(walletAddress, result.session);
-    setWorldIdSession(result.session);
-    setRegistrationMessage(
-      `${input.sourceLabel} verification succeeded. Session valid until ${new Date(result.session.expiresAt).toLocaleString()}.`
-    );
+    try {
+      const result = await verifyWorldIdForWallet({
+        walletAddress,
+        proof: input.proof,
+        appId: input.appId,
+        action: input.action,
+        clientSource: input.clientSource
+      });
+      appendWorldIdDebugLog("backend.verify.success", {
+        profileId: result.session.profileId,
+        verificationLevel: result.session.verificationLevel,
+        source: result.session.source,
+        expiresAt: result.session.expiresAt
+      });
+      saveWorldIdSession(walletAddress, result.session);
+      setWorldIdSession(result.session);
+      setRegistrationMessage(
+        `${input.sourceLabel} verification succeeded. Session valid until ${new Date(result.session.expiresAt).toLocaleString()}.`
+      );
+    } catch (error) {
+      appendWorldIdDebugLog("backend.verify.error", {
+        message: getWorldIdErrorMessage(error),
+        raw: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
   };
 
   const onVerifyWorldIdManual = async () => {
     setRegistrationMessage(null);
     setError(null);
+    setWorldIdDebugLogs([]);
+    appendWorldIdDebugLog("manual.verify.start", {
+      appId: worldIdConfig.external.appId,
+      action: worldIdConfig.external.action
+    });
 
     if (!walletConnected) {
       setError("Connect wallet before World ID verification.");
@@ -269,6 +338,7 @@ export default function VerifyPage() {
     let parsedProof: Record<string, unknown>;
     try {
       parsedProof = JSON.parse(worldProofJson) as Record<string, unknown>;
+      appendWorldIdDebugLog("manual.verify.parsed_proof", summarizeWorldProof(parsedProof));
     } catch {
       setError("World ID proof JSON is invalid.");
       return;
@@ -284,6 +354,7 @@ export default function VerifyPage() {
         clientSource: "manual"
       });
     } catch (err) {
+      appendWorldIdDebugLog("manual.verify.error", err instanceof Error ? err.message : String(err));
       setError(getWorldIdErrorMessage(err));
     } finally {
       setVerifyingWorldId(false);
@@ -293,6 +364,12 @@ export default function VerifyPage() {
   const onVerifyWorldIdMiniApp = async () => {
     setRegistrationMessage(null);
     setError(null);
+    setWorldIdDebugLogs([]);
+    appendWorldIdDebugLog("mini.verify.start", {
+      envMiniAppId: worldIdConfig.mini.appId,
+      envMiniAction: worldIdConfig.mini.action,
+      selectedVerificationLevel: miniVerifyLevel
+    });
 
     if (!walletConnected) {
       setError("Connect wallet before World ID verification.");
@@ -306,39 +383,35 @@ export default function VerifyPage() {
     setVerifyingWorldId(true);
     try {
       const installResult = MiniKit.install();
+      appendWorldIdDebugLog("mini.install.result", installResult);
       if (!isMiniKitInstallUsable(installResult)) {
         const errorCode = installResult.success ? "unknown" : installResult.errorCode;
         throw new Error(`minikit_unavailable: ${errorCode}`);
       }
       setMiniKitAvailable(true);
       const runtimeMiniAppId = readMiniKitRuntimeAppId();
+      appendWorldIdDebugLog("mini.command.availability", {
+        verifyAvailable: isCommandAvailable(Command.Verify),
+        worldAppVersion: MiniKit.deviceProperties.worldAppVersion,
+        deviceOS: MiniKit.deviceProperties.deviceOS
+      });
+      appendWorldIdDebugLog("mini.runtime.app_id", { runtimeMiniAppId });
       if (runtimeMiniAppId && worldIdConfig.mini.appId && runtimeMiniAppId !== worldIdConfig.mini.appId) {
         throw new Error(`world_id_config_mismatch: runtime_app_id=${runtimeMiniAppId}, env_app_id=${worldIdConfig.mini.appId}`);
       }
       const miniAppIdForVerify = runtimeMiniAppId || worldIdConfig.mini.appId;
 
-      const orbPayload = await runMiniKitVerifyWithRetry({
+      const { commandPayload, finalPayload } = await MiniKit.commandsAsync.verify({
         action: worldIdConfig.mini.action,
         signal: walletAddress,
-        verificationLevel: MiniKitVerificationLevel.Orb
+        verification_level: miniVerifyLevel
       });
+      appendWorldIdDebugLog("mini.verify.command_payload", commandPayload ?? null);
+      appendWorldIdDebugLog("mini.verify.final_payload", summarizeMiniKitPayload(finalPayload));
 
-      let proof = buildWorldProofFromMiniKit(orbPayload);
+      const proof = buildWorldProofFromMiniKit(finalPayload);
       if (!proof) {
-        const orbErrorCode = toMiniKitErrorCode(orbPayload);
-        if (!MINI_KIT_VERIFY_DEVICE_FALLBACK_CODES.has(orbErrorCode)) {
-          throw new Error(`world_id_verify_failed: ${orbErrorCode}`);
-        }
-
-        const devicePayload = await runMiniKitVerifyWithRetry({
-          action: worldIdConfig.mini.action,
-          signal: walletAddress,
-          verificationLevel: MiniKitVerificationLevel.Device
-        });
-        proof = buildWorldProofFromMiniKit(devicePayload);
-        if (!proof) {
-          throw new Error(`world_id_verify_failed: ${toMiniKitErrorCode(devicePayload)}`);
-        }
+        throw new Error(`world_id_verify_failed: ${toMiniKitErrorCode(finalPayload)}`);
       }
 
       await verifyWorldIdWithProof({
@@ -349,6 +422,10 @@ export default function VerifyPage() {
         clientSource: "miniapp"
       });
     } catch (err) {
+      appendWorldIdDebugLog("mini.verify.error", {
+        message: getWorldIdErrorMessage(err),
+        raw: err instanceof Error ? err.message : String(err)
+      });
       setError(getWorldIdErrorMessage(err));
     } finally {
       setVerifyingWorldId(false);
@@ -362,16 +439,24 @@ export default function VerifyPage() {
     }
     setRegistrationMessage(null);
     setError(null);
+    setWorldIdDebugLogs([]);
+    appendWorldIdDebugLog("external.verify.start", {
+      appId: worldIdConfig.external.appId,
+      action: worldIdConfig.external.action
+    });
     setVerifyingWorldId(true);
     try {
+      const proof = buildWorldProofFromIdKit(result);
+      appendWorldIdDebugLog("external.verify.proof", summarizeWorldProof(proof));
       await verifyWorldIdWithProof({
-        proof: buildWorldProofFromIdKit(result),
+        proof,
         sourceLabel: "External Widget",
         appId: worldIdConfig.external.appId,
         action: worldIdConfig.external.action,
         clientSource: "external"
       });
     } catch (err) {
+      appendWorldIdDebugLog("external.verify.error", err instanceof Error ? err.message : String(err));
       setError(getWorldIdErrorMessage(err));
       throw err;
     } finally {
@@ -561,6 +646,17 @@ export default function VerifyPage() {
             External: {worldIdConfig.external.appId || "-"} / {worldIdConfig.external.action || "-"}
           </p>
           <div className="action-row">
+            <label>
+              Mini Level
+              <select
+                value={miniVerifyLevel}
+                onChange={(event) => setMiniVerifyLevel(event.target.value as MiniKitVerificationLevel)}
+                disabled={verifyingWorldId}
+              >
+                <option value={MiniKitVerificationLevel.Orb}>orb</option>
+                <option value={MiniKitVerificationLevel.Device}>device</option>
+              </select>
+            </label>
             <button
               type="button"
               onClick={onVerifyWorldIdMiniApp}
@@ -627,6 +723,20 @@ export default function VerifyPage() {
           ) : (
             <p>No active World ID session for this wallet.</p>
           )}
+          <details className="manual-world-proof">
+            <summary>World ID debug logs ({worldIdDebugLogs.length})</summary>
+            <div className="action-row">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setWorldIdDebugLogs([])}
+                disabled={worldIdDebugLogs.length === 0}
+              >
+                Clear Debug Logs
+              </button>
+            </div>
+            <textarea readOnly rows={10} value={worldIdDebugText || "No logs yet."} />
+          </details>
         </section>
 
         <section className="status-card">
