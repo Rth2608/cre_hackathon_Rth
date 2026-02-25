@@ -11,8 +11,8 @@ type MiniKitErrorCatalog = Record<MiniKitCommand, Record<string, MiniKitErrorInf
 export const MINI_KIT_ERROR_CATALOG: MiniKitErrorCatalog = {
   verify: {
     verification_rejected: {
-      description: "The user dismissed the World ID request in World App.",
-      fix: "Trigger verify again if the user wants to continue."
+      description: "World App returned a verification rejection for this request.",
+      fix: "Retry verification and make sure the World App approval prompt is completed."
     },
     max_verifications_reached: {
       description: "The user already hit the maximum verification count for this action.",
@@ -135,7 +135,11 @@ export const MINI_KIT_ERROR_CATALOG: MiniKitErrorCatalog = {
   }
 };
 
-export const MINI_KIT_VERIFY_DEVICE_FALLBACK_CODES = new Set(["credential_unavailable", "inclusion_proof_failed"]);
+export const MINI_KIT_VERIFY_DEVICE_FALLBACK_CODES = new Set([
+  "credential_unavailable",
+  "inclusion_proof_failed",
+  "verification_rejected"
+]);
 
 function normalizeCode(code: string): string {
   return code.trim().toLowerCase();
