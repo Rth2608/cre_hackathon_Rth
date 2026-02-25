@@ -120,6 +120,17 @@ function readMiniKitRuntimeAppId(): string {
   return (MiniKit.appId ?? "").trim();
 }
 
+function installMiniKitWithAppId(appId: string): MiniKitInstallReturnType {
+  const installResult = MiniKit.install(appId);
+  if (isMiniKitInstallUsable(installResult) && appId.trim()) {
+    const normalizedAppId = appId.trim();
+    if (MiniKit.appId !== normalizedAppId) {
+      MiniKit.appId = normalizedAppId;
+    }
+  }
+  return installResult;
+}
+
 function summarizeMiniKitPayload(payload: MiniAppVerifyActionPayload): Record<string, unknown> {
   if (payload.status === "error") {
     return {
@@ -252,12 +263,12 @@ export default function VerifyPage() {
     }
 
     try {
-      const installResult = MiniKit.install();
+      const installResult = installMiniKitWithAppId(worldIdConfig.mini.appId);
       setMiniKitAvailable(isMiniKitInstallUsable(installResult));
     } catch {
       setMiniKitAvailable(false);
     }
-  }, [walletConnected, miniWorldIdConfigured]);
+  }, [walletConnected, miniWorldIdConfigured, worldIdConfig.mini.appId]);
 
   const appendWorldIdDebugLog = (event: string, detail?: unknown) => {
     const entry: WorldIdDebugEntry = {
@@ -382,8 +393,12 @@ export default function VerifyPage() {
 
     setVerifyingWorldId(true);
     try {
-      const installResult = MiniKit.install();
-      appendWorldIdDebugLog("mini.install.result", installResult);
+      appendWorldIdDebugLog("mini.install.before", { appId: readMiniKitRuntimeAppId() || null });
+      const installResult = installMiniKitWithAppId(worldIdConfig.mini.appId);
+      appendWorldIdDebugLog("mini.install.result", {
+        ...installResult,
+        appIdAfterInstall: readMiniKitRuntimeAppId() || null
+      });
       if (!isMiniKitInstallUsable(installResult)) {
         const errorCode = installResult.success ? "unknown" : installResult.errorCode;
         throw new Error(`minikit_unavailable: ${errorCode}`);
