@@ -104,6 +104,10 @@ function waitMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function readMiniKitRuntimeAppId(): string {
+  return (MiniKit.appId ?? "").trim();
+}
+
 async function runMiniKitVerifyWithRetry(input: {
   action: string;
   signal: string;
@@ -138,6 +142,10 @@ function getWorldIdErrorMessage(error: unknown): string {
   const installErrorMatch = message.match(/^minikit_unavailable:\s*([a-z0-9_]+)$/i);
   if (installErrorMatch) {
     return `MiniKit is unavailable (${installErrorMatch[1]}). Open this page inside World App Mini App and retry.`;
+  }
+  const appMismatchMatch = message.match(/^world_id_config_mismatch:\s*(.+)$/i);
+  if (appMismatchMatch) {
+    return `World App runtime appId and deployed env appId differ. ${appMismatchMatch[1]}`;
   }
 
   const normalized = formatKnownMiniKitMessage(message);
@@ -217,12 +225,12 @@ export default function VerifyPage() {
     }
 
     try {
-      const installResult = MiniKit.install(worldIdConfig.mini.appId);
+      const installResult = MiniKit.install();
       setMiniKitAvailable(isMiniKitInstallUsable(installResult));
     } catch {
       setMiniKitAvailable(false);
     }
-  }, [walletConnected, worldIdConfig.mini.appId, miniWorldIdConfigured]);
+  }, [walletConnected, miniWorldIdConfigured]);
 
   const verifyWorldIdWithProof = async (input: {
     proof: Record<string, unknown>;
@@ -297,12 +305,17 @@ export default function VerifyPage() {
 
     setVerifyingWorldId(true);
     try {
-      const installResult = MiniKit.install(worldIdConfig.mini.appId);
+      const installResult = MiniKit.install();
       if (!isMiniKitInstallUsable(installResult)) {
         const errorCode = installResult.success ? "unknown" : installResult.errorCode;
         throw new Error(`minikit_unavailable: ${errorCode}`);
       }
       setMiniKitAvailable(true);
+      const runtimeMiniAppId = readMiniKitRuntimeAppId();
+      if (runtimeMiniAppId && worldIdConfig.mini.appId && runtimeMiniAppId !== worldIdConfig.mini.appId) {
+        throw new Error(`world_id_config_mismatch: runtime_app_id=${runtimeMiniAppId}, env_app_id=${worldIdConfig.mini.appId}`);
+      }
+      const miniAppIdForVerify = runtimeMiniAppId || worldIdConfig.mini.appId;
 
       const orbPayload = await runMiniKitVerifyWithRetry({
         action: worldIdConfig.mini.action,
@@ -331,7 +344,7 @@ export default function VerifyPage() {
       await verifyWorldIdWithProof({
         proof,
         sourceLabel: "Mini App",
-        appId: worldIdConfig.mini.appId,
+        appId: miniAppIdForVerify,
         action: worldIdConfig.mini.action,
         clientSource: "miniapp"
       });
