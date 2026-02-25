@@ -31,6 +31,10 @@ import { isThirdwebClientConfigured, thirdwebClient } from "../lib/thirdweb";
 
 const MODEL_FAMILIES = ["gpt", "gemini", "claude", "grok"] as const;
 type ModelFamily = (typeof MODEL_FAMILIES)[number];
+const MINI_APP_VERIFICATION_LEVELS: [MiniKitVerificationLevel, MiniKitVerificationLevel] = [
+  MiniKitVerificationLevel.Orb,
+  MiniKitVerificationLevel.Device
+];
 
 function buildNodeHeartbeatMessage(input: { walletAddress: string; endpointUrl: string; timestamp: number }): string {
   return [
@@ -75,12 +79,14 @@ function buildWorldProofFromMiniKit(payload: MiniAppVerifyActionPayload): Record
   }
 
   if ("verifications" in payload && Array.isArray(payload.verifications) && payload.verifications.length > 0) {
-    const first = payload.verifications[0];
+    const selectedVerification =
+      payload.verifications.find((item) => item.verification_level === MiniKitVerificationLevel.Orb) ??
+      payload.verifications[0];
     return {
-      merkle_root: first.merkle_root,
-      nullifier_hash: first.nullifier_hash,
-      proof: first.proof,
-      verification_level: first.verification_level
+      merkle_root: selectedVerification.merkle_root,
+      nullifier_hash: selectedVerification.nullifier_hash,
+      proof: selectedVerification.proof,
+      verification_level: selectedVerification.verification_level
     };
   }
 
@@ -251,7 +257,7 @@ export default function VerifyPage() {
       const { finalPayload } = await MiniKit.commandsAsync.verify({
         action: worldIdConfig.mini.action,
         signal: walletAddress,
-        verification_level: MiniKitVerificationLevel.Orb
+        verification_level: MINI_APP_VERIFICATION_LEVELS
       });
 
       const proof = buildWorldProofFromMiniKit(finalPayload);
