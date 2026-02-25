@@ -291,7 +291,7 @@ interface MiniVerifyResult {
 }
 
 const MINI_VERIFY_TIMEOUT_MS = 20_000;
-const MINI_VERIFY_AMBIGUOUS_SETTLE_MS = 1_250;
+const MINI_VERIFY_AMBIGUOUS_SETTLE_MS = 2_500;
 const MINI_VERIFY_DEFAULT_SETTLE_MS = 50;
 
 function isAmbiguousMiniVerifyError(payload: MiniAppVerifyActionPayload): boolean {
