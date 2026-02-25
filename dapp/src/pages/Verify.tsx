@@ -13,6 +13,8 @@ import {
   isCommandAvailable,
   type MiniKitInstallReturnType,
   type MiniAppVerifyActionPayload,
+  type VerifyCommandInput,
+  type VerifyCommandPayload,
   VerificationLevel as MiniKitVerificationLevel
 } from "@worldcoin/minikit-js";
 import { ConnectButton, useActiveAccount } from "thirdweb/react";
@@ -216,6 +218,10 @@ function getWorldIdErrorMessage(error: unknown): string {
   if (commandUnavailableMatch) {
     return `MiniKit command '${commandUnavailableMatch[1]}' is unavailable in this World App runtime. Update World App and reopen this Mini App.`;
   }
+  const verifyTimeoutMatch = message.match(/^world_id_verify_timeout:\s*(.+)$/i);
+  if (verifyTimeoutMatch) {
+    return `World App did not return a verify result in time. ${verifyTimeoutMatch[1]}`;
+  }
   const appMismatchMatch = message.match(/^world_id_config_mismatch:\s*(.+)$/i);
   if (appMismatchMatch) {
     return `World App runtime appId and deployed env appId differ. ${appMismatchMatch[1]}`;
@@ -276,6 +282,96 @@ function installMiniKitRawDebugHook(onTrigger: (event: ResponseEvent, payload: u
     originalTrigger(event, payload);
   };
   debugWindow.__creMiniKitRawTriggerDebugInstalled = true;
+}
+
+interface MiniVerifyResult {
+  commandPayload: VerifyCommandPayload;
+  finalPayload: MiniAppVerifyActionPayload;
+  responseChain: MiniAppVerifyActionPayload[];
+}
+
+const MINI_VERIFY_TIMEOUT_MS = 20_000;
+const MINI_VERIFY_AMBIGUOUS_SETTLE_MS = 1_250;
+const MINI_VERIFY_DEFAULT_SETTLE_MS = 50;
+
+function isAmbiguousMiniVerifyError(payload: MiniAppVerifyActionPayload): boolean {
+  if (payload.status !== "error") {
+    return false;
+  }
+  return payload.error_code === "verification_rejected" || payload.error_code === "user_rejected";
+}
+
+function runMiniVerifyCommand(payload: VerifyCommandInput): Promise<MiniVerifyResult> {
+  if (typeof window === "undefined") {
+    return Promise.reject(new Error("minikit_unavailable: outside_of_worldapp"));
+  }
+
+  return new Promise((resolve, reject) => {
+    let commandPayload: VerifyCommandPayload | null = null;
+    const responseChain: MiniAppVerifyActionPayload[] = [];
+    let settleTimer: number | undefined;
+    let timeoutTimer: number | undefined;
+
+    const cleanup = () => {
+      MiniKit.unsubscribe(ResponseEvent.MiniAppVerifyAction);
+      if (settleTimer !== undefined) {
+        window.clearTimeout(settleTimer);
+      }
+      if (timeoutTimer !== undefined) {
+        window.clearTimeout(timeoutTimer);
+      }
+    };
+
+    const finalize = () => {
+      const finalPayload = responseChain[responseChain.length - 1];
+      cleanup();
+      if (!commandPayload) {
+        reject(
+          new Error(
+            "Failed to send verify command. Ensure MiniKit is installed and the verify command is available."
+          )
+        );
+        return;
+      }
+      if (!finalPayload) {
+        reject(new Error("world_id_verify_timeout: no verify response returned from World App."));
+        return;
+      }
+      resolve({
+        commandPayload,
+        finalPayload,
+        responseChain: [...responseChain]
+      });
+    };
+
+    const scheduleFinalize = (delayMs: number) => {
+      if (settleTimer !== undefined) {
+        window.clearTimeout(settleTimer);
+      }
+      settleTimer = window.setTimeout(finalize, delayMs);
+    };
+
+    MiniKit.subscribe(ResponseEvent.MiniAppVerifyAction, (response: MiniAppVerifyActionPayload) => {
+      responseChain.push(response);
+      if (isAmbiguousMiniVerifyError(response)) {
+        scheduleFinalize(MINI_VERIFY_AMBIGUOUS_SETTLE_MS);
+        return;
+      }
+      scheduleFinalize(MINI_VERIFY_DEFAULT_SETTLE_MS);
+    });
+
+    commandPayload = MiniKit.commands.verify(payload);
+    if (!commandPayload) {
+      cleanup();
+      reject(new Error("minikit_command_unavailable: verify"));
+      return;
+    }
+
+    timeoutTimer = window.setTimeout(() => {
+      cleanup();
+      reject(new Error("world_id_verify_timeout: no verify response returned from World App."));
+    }, MINI_VERIFY_TIMEOUT_MS);
+  });
 }
 
 export default function VerifyPage() {
@@ -514,12 +610,13 @@ export default function VerifyPage() {
       }
       const miniAppIdForVerify = runtimeMiniAppId || worldIdConfig.mini.appId;
 
-      const { commandPayload, finalPayload } = await MiniKit.commandsAsync.verify({
+      const { commandPayload, finalPayload, responseChain } = await runMiniVerifyCommand({
         action: worldIdConfig.mini.action,
         signal: walletAddress,
         verification_level: requestedVerificationLevel
       });
       appendWorldIdDebugLog("mini.verify.command_payload", commandPayload ?? null);
+      appendWorldIdDebugLog("mini.verify.response_chain", responseChain);
       appendWorldIdDebugLog(
         "mini.verify.final_payload",
         finalPayload.status === "error" ? finalPayload : summarizeMiniKitPayload(finalPayload)
