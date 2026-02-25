@@ -626,6 +626,9 @@ async function handleGetReport(requestId: string): Promise<Response> {
 interface VerifyWorldIdBody {
   walletAddress: string;
   proof: unknown;
+  appId?: string;
+  action?: string;
+  clientSource?: string;
 }
 
 async function handleVerifyWorldId(req: Request): Promise<Response> {
@@ -661,7 +664,10 @@ async function handleVerifyWorldId(req: Request): Promise<Response> {
 
     const session = await issueWorldIdSessionFromProof({
       walletAddress: normalizedWalletAddress,
-      rawProof: (body.proof ?? {}) as Record<string, unknown>
+      rawProof: (body.proof ?? {}) as Record<string, unknown>,
+      appId: body.appId,
+      action: body.action,
+      clientSource: body.clientSource
     });
 
     return jsonResponse({

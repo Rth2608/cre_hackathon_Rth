@@ -26,7 +26,7 @@ import {
   type RequestRecord,
   type WorldIdSession
 } from "../lib/api";
-import { clearWorldIdSession, getWorldIdConfig, isWorldIdConfigured, loadWorldIdSession, saveWorldIdSession } from "../lib/worldId";
+import { clearWorldIdSession, getWorldIdConfig, loadWorldIdSession, saveWorldIdSession } from "../lib/worldId";
 import { isThirdwebClientConfigured, thirdwebClient } from "../lib/thirdweb";
 
 const MODEL_FAMILIES = ["gpt", "gemini", "claude", "grok"] as const;
@@ -103,8 +103,9 @@ export default function VerifyPage() {
   const walletAddress = activeAccount?.address ?? "";
   const walletConnected = walletAddress.length > 0;
   const thirdwebConfigured = isThirdwebClientConfigured();
-  const worldIdConfigured = isWorldIdConfigured();
   const worldIdConfig = getWorldIdConfig();
+  const miniWorldIdConfigured = worldIdConfig.mini.configured;
+  const externalWorldIdConfigured = worldIdConfig.external.configured;
 
   const [requests, setRequests] = useState<RequestRecord[]>([]);
   const [nodes, setNodes] = useState<RegisteredNode[]>([]);
@@ -154,28 +155,37 @@ export default function VerifyPage() {
   }, [walletAddress, walletConnected]);
 
   useEffect(() => {
-    if (!worldIdConfigured || !walletConnected) {
+    if (!miniWorldIdConfigured || !walletConnected) {
       setMiniKitAvailable(false);
       return;
     }
 
     try {
-      const installResult = MiniKit.install(worldIdConfig.appId);
+      const installResult = MiniKit.install(worldIdConfig.mini.appId);
       setMiniKitAvailable(isMiniKitInstallUsable(installResult));
     } catch {
       setMiniKitAvailable(false);
     }
-  }, [walletConnected, worldIdConfig.appId, worldIdConfigured]);
+  }, [walletConnected, worldIdConfig.mini.appId, miniWorldIdConfigured]);
 
-  const verifyWorldIdWithProof = async (proof: Record<string, unknown>, sourceLabel: string) => {
+  const verifyWorldIdWithProof = async (input: {
+    proof: Record<string, unknown>;
+    sourceLabel: string;
+    appId: string;
+    action: string;
+    clientSource: "miniapp" | "external" | "manual";
+  }) => {
     const result = await verifyWorldIdForWallet({
       walletAddress,
-      proof
+      proof: input.proof,
+      appId: input.appId,
+      action: input.action,
+      clientSource: input.clientSource
     });
     saveWorldIdSession(walletAddress, result.session);
     setWorldIdSession(result.session);
     setRegistrationMessage(
-      `${sourceLabel} verification succeeded. Session valid until ${new Date(result.session.expiresAt).toLocaleString()}.`
+      `${input.sourceLabel} verification succeeded. Session valid until ${new Date(result.session.expiresAt).toLocaleString()}.`
     );
   };
 
@@ -187,8 +197,8 @@ export default function VerifyPage() {
       setError("Connect wallet before World ID verification.");
       return;
     }
-    if (!worldIdConfigured) {
-      setError("Missing VITE_WORLD_ID_APP_ID / VITE_WORLD_ID_ACTION.");
+    if (!externalWorldIdConfigured) {
+      setError("Missing external World ID config. Set VITE_WORLD_ID_EXTERNAL_APP_ID / VITE_WORLD_ID_EXTERNAL_ACTION.");
       return;
     }
 
@@ -202,7 +212,13 @@ export default function VerifyPage() {
 
     setVerifyingWorldId(true);
     try {
-      await verifyWorldIdWithProof(parsedProof, "Manual");
+      await verifyWorldIdWithProof({
+        proof: parsedProof,
+        sourceLabel: "Manual",
+        appId: worldIdConfig.external.appId,
+        action: worldIdConfig.external.action,
+        clientSource: "manual"
+      });
     } catch (err) {
       setError(getWorldIdErrorMessage(err));
     } finally {
@@ -218,14 +234,14 @@ export default function VerifyPage() {
       setError("Connect wallet before World ID verification.");
       return;
     }
-    if (!worldIdConfigured) {
-      setError("Missing VITE_WORLD_ID_APP_ID / VITE_WORLD_ID_ACTION.");
+    if (!miniWorldIdConfigured) {
+      setError("Missing mini app World ID config. Set VITE_WORLD_ID_MINI_APP_ID / VITE_WORLD_ID_MINI_ACTION.");
       return;
     }
 
     setVerifyingWorldId(true);
     try {
-      const installResult = MiniKit.install(worldIdConfig.appId);
+      const installResult = MiniKit.install(worldIdConfig.mini.appId);
       if (!isMiniKitInstallUsable(installResult)) {
         const errorCode = installResult.success ? "unknown" : installResult.errorCode;
         throw new Error(`minikit_unavailable: ${errorCode}`);
@@ -233,9 +249,9 @@ export default function VerifyPage() {
       setMiniKitAvailable(true);
 
       const { finalPayload } = await MiniKit.commandsAsync.verify({
-        action: worldIdConfig.action,
+        action: worldIdConfig.mini.action,
         signal: walletAddress,
-        verification_level: MiniKitVerificationLevel.Device
+        verification_level: MiniKitVerificationLevel.Orb
       });
 
       const proof = buildWorldProofFromMiniKit(finalPayload);
@@ -246,7 +262,13 @@ export default function VerifyPage() {
         throw new Error("world_id_verify_failed: invalid_miniapp_payload");
       }
 
-      await verifyWorldIdWithProof(proof, "Mini App");
+      await verifyWorldIdWithProof({
+        proof,
+        sourceLabel: "Mini App",
+        appId: worldIdConfig.mini.appId,
+        action: worldIdConfig.mini.action,
+        clientSource: "miniapp"
+      });
     } catch (err) {
       setError(getWorldIdErrorMessage(err));
     } finally {
@@ -263,7 +285,13 @@ export default function VerifyPage() {
     setError(null);
     setVerifyingWorldId(true);
     try {
-      await verifyWorldIdWithProof(buildWorldProofFromIdKit(result), "External Widget");
+      await verifyWorldIdWithProof({
+        proof: buildWorldProofFromIdKit(result),
+        sourceLabel: "External Widget",
+        appId: worldIdConfig.external.appId,
+        action: worldIdConfig.external.action,
+        clientSource: "external"
+      });
     } catch (err) {
       setError(getWorldIdErrorMessage(err));
       throw err;
@@ -448,20 +476,23 @@ export default function VerifyPage() {
             activation.
           </p>
           <p className="config-warning">
-            App ID: {worldIdConfig.appId || "-"} / Action: {worldIdConfig.action || "-"}
+            Mini App: {worldIdConfig.mini.appId || "-"} / {worldIdConfig.mini.action || "-"}
+          </p>
+          <p className="config-warning">
+            External: {worldIdConfig.external.appId || "-"} / {worldIdConfig.external.action || "-"}
           </p>
           <div className="action-row">
             <button
               type="button"
               onClick={onVerifyWorldIdMiniApp}
-              disabled={!walletConnected || verifyingWorldId || !worldIdConfigured}
+              disabled={!walletConnected || verifyingWorldId || !miniWorldIdConfigured}
             >
               {verifyingWorldId ? "Verifying..." : "Verify in World Mini App"}
             </button>
-            {worldIdConfigured ? (
+            {externalWorldIdConfigured ? (
               <IDKitWidget
-                app_id={worldIdConfig.appId}
-                action={worldIdConfig.action}
+                app_id={worldIdConfig.external.appId}
+                action={worldIdConfig.external.action}
                 signal={walletAddress}
                 verification_level={IDKitVerificationLevel.Device}
                 handleVerify={onVerifyWorldIdExternal}
@@ -504,7 +535,7 @@ export default function VerifyPage() {
                 type="button"
                 className="secondary"
                 onClick={onVerifyWorldIdManual}
-                disabled={!walletConnected || verifyingWorldId || !worldIdConfigured}
+                disabled={!walletConnected || verifyingWorldId || !externalWorldIdConfigured}
               >
                 {verifyingWorldId ? "Verifying..." : "Verify Manual Proof"}
               </button>

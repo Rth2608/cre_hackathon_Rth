@@ -1,21 +1,46 @@
 import type { WorldIdSession } from "./api";
 
-const worldIdAppId = (import.meta.env.VITE_WORLD_ID_APP_ID || "").trim();
-const worldIdAction = (import.meta.env.VITE_WORLD_ID_ACTION || "").trim();
+const legacyWorldIdAppId = (import.meta.env.VITE_WORLD_ID_APP_ID || "").trim();
+const legacyWorldIdAction = (import.meta.env.VITE_WORLD_ID_ACTION || "").trim();
+const miniWorldIdAppId = (import.meta.env.VITE_WORLD_ID_MINI_APP_ID || legacyWorldIdAppId).trim();
+const miniWorldIdAction = (import.meta.env.VITE_WORLD_ID_MINI_ACTION || legacyWorldIdAction).trim();
+const externalWorldIdAppId = (import.meta.env.VITE_WORLD_ID_EXTERNAL_APP_ID || legacyWorldIdAppId).trim();
+const externalWorldIdAction = (import.meta.env.VITE_WORLD_ID_EXTERNAL_ACTION || legacyWorldIdAction).trim();
+
+export interface WorldIdClientConfig {
+  appId: string;
+  action: string;
+  configured: boolean;
+}
+
+export interface WorldIdConfig {
+  mini: WorldIdClientConfig;
+  external: WorldIdClientConfig;
+}
+
+function buildClientConfig(appId: string, action: string): WorldIdClientConfig {
+  return {
+    appId,
+    action,
+    configured: appId.length > 0 && action.length > 0
+  };
+}
+
+const worldIdConfig: WorldIdConfig = {
+  mini: buildClientConfig(miniWorldIdAppId, miniWorldIdAction),
+  external: buildClientConfig(externalWorldIdAppId, externalWorldIdAction)
+};
 
 function buildSessionStorageKey(walletAddress: string): string {
   return `cre:world-id:session:${walletAddress.trim().toLowerCase()}`;
 }
 
 export function isWorldIdConfigured(): boolean {
-  return worldIdAppId.length > 0 && worldIdAction.length > 0;
+  return worldIdConfig.mini.configured || worldIdConfig.external.configured;
 }
 
-export function getWorldIdConfig(): { appId: string; action: string } {
-  return {
-    appId: worldIdAppId,
-    action: worldIdAction
-  };
+export function getWorldIdConfig(): WorldIdConfig {
+  return worldIdConfig;
 }
 
 export function saveWorldIdSession(walletAddress: string, session: WorldIdSession): void {

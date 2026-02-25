@@ -142,6 +142,8 @@ export interface WorldIdSession {
   appId: string;
   action: string;
   verificationLevel?: string;
+  profileId?: string;
+  clientSource?: "miniapp" | "external" | "manual";
   issuedAt: string;
   expiresAt: string;
   source: "world_id_cloud" | "assume";
@@ -340,13 +342,22 @@ export async function requestNodeChallenge(input: {
 export async function verifyWorldIdForWallet(input: {
   walletAddress: string;
   proof: WorldIdProofInput;
+  appId?: string;
+  action?: string;
+  clientSource?: "miniapp" | "external" | "manual";
 }): Promise<{ session: WorldIdSession }> {
   return requestJson<{ session: WorldIdSession }>("/api/world-id/verify", {
     method: "POST",
     headers: {
       "x-wallet-address": input.walletAddress
     },
-    body: JSON.stringify(input)
+    body: JSON.stringify({
+      walletAddress: input.walletAddress,
+      proof: input.proof,
+      appId: input.appId,
+      action: input.action,
+      clientSource: input.clientSource
+    })
   });
 }
 

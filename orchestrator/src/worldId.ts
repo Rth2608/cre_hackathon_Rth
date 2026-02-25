@@ -17,6 +17,8 @@ interface StoredWorldIdSession {
   appId: string;
   action: string;
   verificationLevel?: string;
+  profileId?: string;
+  clientSource?: WorldIdClientSource;
   issuedAt: string;
   expiresAt: string;
   source: "world_id_cloud" | "assume";
@@ -29,6 +31,8 @@ export interface WorldIdSession {
   appId: string;
   action: string;
   verificationLevel?: string;
+  profileId?: string;
+  clientSource?: WorldIdClientSource;
   issuedAt: string;
   expiresAt: string;
   source: "world_id_cloud" | "assume";
@@ -57,6 +61,15 @@ interface ParsedWorldIdProofPayload {
   action?: string;
 }
 
+export type WorldIdClientSource = "miniapp" | "external" | "manual";
+
+interface WorldIdProfile {
+  id: string;
+  appId: string;
+  action: string;
+  allowedClientSources: WorldIdClientSource[];
+}
+
 interface VerifyApiSuccess {
   success: true;
   [key: string]: unknown;
@@ -77,6 +90,17 @@ interface VerifyApiResult {
 
 function normalizeAddress(value: string): string {
   return getAddress(value).toLowerCase();
+}
+
+function normalizeClientSource(value: unknown): WorldIdClientSource | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "miniapp" || normalized === "external" || normalized === "manual") {
+    return normalized;
+  }
+  return undefined;
 }
 
 function toTrimmedString(value: unknown): string | undefined {
@@ -193,6 +217,116 @@ function resolveWorldIdAction(): string {
   return process.env.WORLD_ID_ACTION?.trim() ?? "";
 }
 
+function normalizeWorldIdProfile(raw: unknown): WorldIdProfile | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const record = raw as Record<string, unknown>;
+  const appId = toTrimmedString(record.appId);
+  const action = toTrimmedString(record.action);
+  if (!appId || !action) {
+    return null;
+  }
+  const id = toTrimmedString(record.id) ?? `${appId}:${action}`;
+  const allowedClientSources = Array.isArray(record.clientSources)
+    ? Array.from(new Set(record.clientSources.map((item) => normalizeClientSource(item)).filter(Boolean))) as WorldIdClientSource[]
+    : [];
+
+  return {
+    id,
+    appId,
+    action,
+    allowedClientSources
+  };
+}
+
+function resolveWorldIdProfilesFromEnv(): WorldIdProfile[] {
+  const raw = process.env.WORLD_ID_ALLOWED_PROFILES_JSON?.trim();
+  if (!raw) {
+    return [];
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("world_id_allowed_profiles_json_invalid_json");
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error("world_id_allowed_profiles_json_must_be_array");
+  }
+
+  const profiles: WorldIdProfile[] = [];
+  for (const entry of parsed) {
+    const normalized = normalizeWorldIdProfile(entry);
+    if (!normalized) {
+      continue;
+    }
+    profiles.push(normalized);
+  }
+  return profiles;
+}
+
+function resolveWorldIdProfiles(): WorldIdProfile[] {
+  const configuredProfiles = resolveWorldIdProfilesFromEnv();
+  if (configuredProfiles.length > 0) {
+    return configuredProfiles;
+  }
+
+  const appId = resolveWorldIdAppId();
+  const action = resolveWorldIdAction();
+  if (!appId || !action) {
+    return [];
+  }
+
+  return [
+    {
+      id: "default",
+      appId,
+      action,
+      allowedClientSources: []
+    }
+  ];
+}
+
+function resolveRequestedProfile(input: {
+  profiles: WorldIdProfile[];
+  requestedAppId?: string;
+  requestedAction?: string;
+  requestedClientSource?: WorldIdClientSource;
+}): WorldIdProfile {
+  const appId = input.requestedAppId?.trim() || undefined;
+  const action = input.requestedAction?.trim() || undefined;
+  const requestedClientSource = input.requestedClientSource;
+
+  let candidates = [...input.profiles];
+  if (appId) {
+    candidates = candidates.filter((profile) => profile.appId === appId);
+  }
+  if (action) {
+    candidates = candidates.filter((profile) => profile.action === action);
+  }
+
+  candidates = candidates.filter((profile) => {
+    if (profile.allowedClientSources.length === 0) {
+      return true;
+    }
+    if (!requestedClientSource) {
+      return false;
+    }
+    return profile.allowedClientSources.includes(requestedClientSource);
+  });
+
+  if (candidates.length === 0) {
+    throw new Error("world_id_profile_not_found");
+  }
+  if (candidates.length > 1) {
+    throw new Error("world_id_profile_ambiguous");
+  }
+  return candidates[0];
+}
+
 function resolveWorldIdVerifyApiBase(): string {
   return (process.env.WORLD_ID_VERIFY_API_BASE_URL?.trim() ?? DEFAULT_WORLD_ID_VERIFY_API_BASE).replace(/\/$/, "");
 }
@@ -245,6 +379,8 @@ function normalizeStoredSession(session: StoredWorldIdSession): StoredWorldIdSes
     appId: session.appId.trim(),
     action: session.action.trim(),
     verificationLevel: session.verificationLevel?.trim(),
+    profileId: session.profileId?.trim() || undefined,
+    clientSource: normalizeClientSource(session.clientSource),
     issuedAt: session.issuedAt,
     expiresAt: session.expiresAt,
     source: session.source === "assume" ? "assume" : "world_id_cloud"
@@ -260,6 +396,8 @@ function toPublicSession(session: StoredWorldIdSession): WorldIdSession {
     appId: normalized.appId,
     action: normalized.action,
     verificationLevel: normalized.verificationLevel,
+    profileId: normalized.profileId,
+    clientSource: normalized.clientSource,
     issuedAt: normalized.issuedAt,
     expiresAt: normalized.expiresAt,
     source: normalized.source
@@ -354,6 +492,8 @@ function buildSession(input: {
   appId: string;
   action: string;
   verificationLevel?: string;
+  profileId?: string;
+  clientSource?: WorldIdClientSource;
   source: "world_id_cloud" | "assume";
 }): StoredWorldIdSession {
   const issuedAt = nowIso();
@@ -365,6 +505,8 @@ function buildSession(input: {
     appId: input.appId,
     action: input.action,
     verificationLevel: input.verificationLevel,
+    profileId: input.profileId,
+    clientSource: input.clientSource,
     issuedAt,
     expiresAt,
     source: input.source
@@ -387,23 +529,32 @@ function nullifierBoundToDifferentWallet(input: {
 export async function issueWorldIdSessionFromProof(input: {
   walletAddress: string;
   rawProof: WorldIdProofInput;
+  appId?: string;
+  action?: string;
+  clientSource?: string;
 }): Promise<WorldIdSession> {
   const normalizedWalletAddress = normalizeAddress(input.walletAddress);
-  const appId = resolveWorldIdAppId();
-  const expectedAction = resolveWorldIdAction();
-
-  if (!appId) {
-    throw new Error("world_id_app_id_missing");
-  }
-  if (!expectedAction) {
-    throw new Error("world_id_action_missing");
+  const profiles = resolveWorldIdProfiles();
+  if (profiles.length === 0) {
+    throw new Error("world_id_profile_missing");
   }
 
   const parsedProof = parseWorldIdProof(input.rawProof);
   assertParsedProofValid(parsedProof);
 
-  if (parsedProof.action && parsedProof.action !== expectedAction) {
-    throw new Error(`world_id_action_mismatch: expected ${expectedAction}, got ${parsedProof.action}`);
+  const requestedClientSource = normalizeClientSource(input.clientSource);
+  if (input.clientSource && !requestedClientSource) {
+    throw new Error("world_id_client_source_invalid");
+  }
+  const selectedProfile = resolveRequestedProfile({
+    profiles,
+    requestedAppId: input.appId,
+    requestedAction: input.action ?? parsedProof.action,
+    requestedClientSource
+  });
+
+  if (parsedProof.action && parsedProof.action !== selectedProfile.action) {
+    throw new Error(`world_id_action_mismatch: expected ${selectedProfile.action}, got ${parsedProof.action}`);
   }
 
   if (isWorldIdAssumeEnabled()) {
@@ -421,9 +572,11 @@ export async function issueWorldIdSessionFromProof(input: {
     const session = buildSession({
       walletAddress: normalizedWalletAddress,
       nullifierHash: parsedProof.nullifierHash,
-      appId,
-      action: expectedAction,
+      appId: selectedProfile.appId,
+      action: selectedProfile.action,
       verificationLevel: parsedProof.verificationLevel,
+      profileId: selectedProfile.id,
+      clientSource: requestedClientSource,
       source: "assume"
     });
     db.sessions[session.token] = session;
@@ -433,8 +586,8 @@ export async function issueWorldIdSessionFromProof(input: {
   }
 
   const verifyResult = await verifyWithWorldCloud({
-    appId,
-    expectedAction,
+    appId: selectedProfile.appId,
+    expectedAction: selectedProfile.action,
     proofPayload: parsedProof
   });
   if (!verifyResult.ok) {
@@ -458,9 +611,11 @@ export async function issueWorldIdSessionFromProof(input: {
   const session = buildSession({
     walletAddress: normalizedWalletAddress,
     nullifierHash: parsedProof.nullifierHash,
-    appId,
-    action: expectedAction,
+    appId: selectedProfile.appId,
+    action: selectedProfile.action,
     verificationLevel: parsedProof.verificationLevel,
+    profileId: selectedProfile.id,
+    clientSource: requestedClientSource,
     source: "world_id_cloud"
   });
 
