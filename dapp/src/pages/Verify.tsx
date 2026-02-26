@@ -284,11 +284,32 @@ function summarizeMiniKitPayload(payload: MiniAppVerifyActionPayload): Record<st
 }
 
 function summarizeWorldProof(proof: Record<string, unknown>): Record<string, unknown> {
-  const proofValue = proof.proof;
+  const nestedResult =
+    proof.result && typeof proof.result === "object" && !Array.isArray(proof.result)
+      ? (proof.result as Record<string, unknown>)
+      : null;
+  const firstResponse =
+    Array.isArray(proof.responses) && proof.responses.length > 0 && proof.responses[0] && typeof proof.responses[0] === "object"
+      ? (proof.responses[0] as Record<string, unknown>)
+      : null;
+
+  const proofValue =
+    proof.proof ??
+    nestedResult?.proof ??
+    firstResponse?.proof;
+  const merkleRootValue =
+    proof.merkle_root ??
+    nestedResult?.merkle_root ??
+    firstResponse?.merkle_root;
+  const nullifierHashValue =
+    proof.nullifier_hash ??
+    nestedResult?.nullifier_hash ??
+    firstResponse?.nullifier_hash;
+
   return {
     verificationLevel: proof.verification_level,
-    hasMerkleRoot: typeof proof.merkle_root === "string" && proof.merkle_root.length > 0,
-    hasNullifierHash: typeof proof.nullifier_hash === "string" && proof.nullifier_hash.length > 0,
+    hasMerkleRoot: typeof merkleRootValue === "string" && merkleRootValue.length > 0,
+    hasNullifierHash: typeof nullifierHashValue === "string" && nullifierHashValue.length > 0,
     proofType: Array.isArray(proofValue) ? "array" : typeof proofValue,
     proofLength:
       typeof proofValue === "string"

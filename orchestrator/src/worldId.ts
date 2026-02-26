@@ -323,7 +323,15 @@ function resolveRequestedProfile(input: {
   });
 
   if (candidates.length === 0) {
-    throw new Error("world_id_profile_not_found");
+    const availableProfiles = input.profiles
+      .map((profile) => {
+        const sources = profile.allowedClientSources.length > 0 ? profile.allowedClientSources.join("|") : "*";
+        return `${profile.appId}:${profile.action}:${sources}`;
+      })
+      .join(",");
+    throw new Error(
+      `world_id_profile_not_found: requested_app_id=${appId ?? "-"}, requested_action=${action ?? "-"}, requested_client_source=${requestedClientSource ?? "-"}, available_profiles=${availableProfiles || "-"}`
+    );
   }
   if (candidates.length > 1) {
     throw new Error("world_id_profile_ambiguous");
