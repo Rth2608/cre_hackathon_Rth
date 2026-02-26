@@ -189,7 +189,8 @@ function parseWorldIdV4Proof(rawInput: WorldIdProofInput): ParsedWorldIdV4ProofP
   const action =
     toTrimmedString(v4Record.action) ??
     toTrimmedString(result?.action) ??
-    toTrimmedString(firstResponse?.action);
+    toTrimmedString(firstResponse?.action) ??
+    toTrimmedString(firstResponse?.identifier);
 
   return {
     rawPayload: v4Record,
@@ -488,6 +489,52 @@ async function runWorldVerifyRequest(input: { verifyUrl: string; requestBody: Re
   }
 }
 
+function buildWorldVerifyRequestBody(input: { proofPayload: ParsedWorldIdV4ProofPayload }): Record<string, unknown> {
+  const raw = input.proofPayload.rawPayload;
+  const protocolVersion = toTrimmedString(raw.protocol_version) ?? "";
+  if (!protocolVersion.startsWith("3")) {
+    return raw;
+  }
+
+  const action = toTrimmedString(raw.action) ?? input.proofPayload.action;
+  const responsesRaw = Array.isArray(raw.responses) ? raw.responses : [];
+  const normalizedResponses = responsesRaw.map((entry) => {
+    const responseRecord = toRecord(entry);
+    if (!responseRecord) {
+      return entry;
+    }
+    const normalized = { ...responseRecord };
+    const nullifier =
+      toTrimmedString(normalized.nullifier) ??
+      toTrimmedString(normalized.nullifier_hash) ??
+      input.proofPayload.nullifierHash;
+    if (nullifier) {
+      normalized.nullifier = nullifier;
+      if (!toTrimmedString(normalized.nullifier_hash)) {
+        normalized.nullifier_hash = nullifier;
+      }
+    }
+
+    const identifier = toTrimmedString(normalized.identifier) ?? toTrimmedString(normalized.action) ?? action;
+    if (identifier) {
+      normalized.identifier = identifier;
+      if (!toTrimmedString(normalized.action)) {
+        normalized.action = identifier;
+      }
+    }
+    return normalized;
+  });
+
+  const requestBody: Record<string, unknown> = {
+    ...raw
+  };
+  if (normalizedResponses.length > 0) {
+    requestBody.responses = normalizedResponses;
+  }
+
+  return requestBody;
+}
+
 async function verifyWithWorldCloudV4(input: {
   routeId: string;
   proofPayload: ParsedWorldIdV4ProofPayload;
@@ -495,7 +542,7 @@ async function verifyWithWorldCloudV4(input: {
   const verifyUrl = `${resolveWorldIdVerifyApiV4Base()}/${input.routeId}`;
   return runWorldVerifyRequest({
     verifyUrl,
-    requestBody: input.proofPayload.rawPayload
+    requestBody: buildWorldVerifyRequestBody({ proofPayload: input.proofPayload })
   });
 }
 

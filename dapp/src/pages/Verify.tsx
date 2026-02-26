@@ -115,8 +115,9 @@ function hasWorldIdProofMaterial(value: Record<string, unknown>): boolean {
       const response = entry as Record<string, unknown>;
       const responseProof = typeof response.proof === "string" && response.proof.trim().length > 0;
       const responseNullifier = typeof response.nullifier_hash === "string" && response.nullifier_hash.trim().length > 0;
+      const responseNullifierLegacy = typeof response.nullifier === "string" && response.nullifier.trim().length > 0;
       const responseMerkleRoot = typeof response.merkle_root === "string" && response.merkle_root.trim().length > 0;
-      if (responseProof || responseNullifier || responseMerkleRoot) {
+      if (responseProof || responseNullifier || responseNullifierLegacy || responseMerkleRoot) {
         return true;
       }
     }
@@ -191,6 +192,8 @@ function buildWorldProofFromMiniKit(
     signal: input.signal,
     responses: [
       {
+        identifier: input.action,
+        nullifier: legacyPayload.nullifierHash,
         nullifier_hash: legacyPayload.nullifierHash,
         merkle_root: legacyPayload.merkleRoot,
         proof: legacyPayload.proof,
@@ -304,7 +307,8 @@ function summarizeWorldProof(proof: Record<string, unknown>): Record<string, unk
   const nullifierHashValue =
     proof.nullifier_hash ??
     nestedResult?.nullifier_hash ??
-    firstResponse?.nullifier_hash;
+    firstResponse?.nullifier_hash ??
+    firstResponse?.nullifier;
 
   return {
     verificationLevel: proof.verification_level,
