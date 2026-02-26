@@ -174,7 +174,7 @@ function resolveWorldIdCredentialIdentifier(value: string | undefined): string |
 
 function buildWorldProofFromMiniKit(
   payload: MiniAppVerifyActionPayload,
-  input: { action: string; signal: string; nonceHint?: string }
+  input: { action: string; signal: string; signalHashHint?: string; nonceHint?: string }
 ): Record<string, unknown> | null {
   if (payload.status !== "success") {
     return null;
@@ -196,6 +196,8 @@ function buildWorldProofFromMiniKit(
   const nonceCandidate = input.nonceHint?.trim();
   const nonce = nonceCandidate && nonceCandidate.length > 0 ? nonceCandidate : `mini-${Date.now()}-${Math.random()}`;
   const identifier = resolveWorldIdCredentialIdentifier(legacyPayload.verificationLevel);
+  const signalHashCandidate = input.signalHashHint?.trim();
+  const signalHash = signalHashCandidate && signalHashCandidate.length > 0 ? signalHashCandidate : undefined;
 
   return {
     protocol_version: "3.0",
@@ -209,7 +211,8 @@ function buildWorldProofFromMiniKit(
         nullifier_hash: legacyPayload.nullifierHash,
         merkle_root: legacyPayload.merkleRoot,
         proof: legacyPayload.proof,
-        verification_level: legacyPayload.verificationLevel
+        verification_level: legacyPayload.verificationLevel,
+        signal_hash: signalHash
       }
     ]
   };
@@ -746,6 +749,7 @@ export default function VerifyPage() {
       const proofBuildInput = {
         action: worldIdConfig.mini.action,
         signal: walletAddress,
+        signalHashHint: typeof commandPayload.signal === "string" ? commandPayload.signal : undefined,
         nonceHint: typeof commandPayload.timestamp === "string" ? commandPayload.timestamp : undefined
       };
       const proofCandidates: Array<{ source: string; payload: MiniAppVerifyActionPayload }> = [
