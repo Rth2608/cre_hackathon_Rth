@@ -321,11 +321,20 @@ function summarizeWorldProof(proof: Record<string, unknown>): Record<string, unk
     nestedResult?.nullifier_hash ??
     firstResponse?.nullifier_hash ??
     firstResponse?.nullifier;
+  const signalValue =
+    proof.signal ??
+    nestedResult?.signal;
+  const signalHashValue =
+    proof.signal_hash ??
+    nestedResult?.signal_hash ??
+    firstResponse?.signal_hash;
 
   return {
     verificationLevel: proof.verification_level,
     hasMerkleRoot: typeof merkleRootValue === "string" && merkleRootValue.length > 0,
     hasNullifierHash: typeof nullifierHashValue === "string" && nullifierHashValue.length > 0,
+    hasSignal: typeof signalValue === "string" && signalValue.length > 0,
+    hasSignalHash: typeof signalHashValue === "string" && signalHashValue.length > 0,
     proofType: Array.isArray(proofValue) ? "array" : typeof proofValue,
     proofLength:
       typeof proofValue === "string"

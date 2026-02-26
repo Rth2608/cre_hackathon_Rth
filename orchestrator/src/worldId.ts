@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { getAddress } from "ethers";
+import { getAddress, keccak256, toUtf8Bytes } from "ethers";
 import { ensureDir, nowIso, readJsonFile, resolveProjectPath, writeJsonFileAtomic } from "./utils";
 
 const DEFAULT_WORLD_ID_VERIFY_API_V4_BASE = "https://developer.world.org/api/v4/verify";
@@ -118,6 +118,12 @@ function normalizeWorldIdV3Identifier(value: unknown): string | undefined {
     return undefined;
   }
   return normalized;
+}
+
+function hashSignalToField(signal: string): string {
+  const digest = BigInt(keccak256(toUtf8Bytes(signal)));
+  const fieldValue = digest >> 8n;
+  return `0x${fieldValue.toString(16).padStart(64, "0")}`;
 }
 
 function toTrimmedString(value: unknown): string | undefined {
@@ -509,6 +515,8 @@ function buildWorldVerifyRequestBody(input: { proofPayload: ParsedWorldIdV4Proof
   }
 
   const action = toTrimmedString(raw.action) ?? input.proofPayload.action;
+  const rawSignal = toTrimmedString(raw.signal);
+  const signalHash = rawSignal ? hashSignalToField(rawSignal) : undefined;
   const defaultIdentifier = normalizeWorldIdV3Identifier(input.proofPayload.verificationLevel);
   const responsesRaw = Array.isArray(raw.responses) ? raw.responses : [];
   const normalizedResponses = responsesRaw.map((entry) => {
@@ -538,6 +546,9 @@ function buildWorldVerifyRequestBody(input: { proofPayload: ParsedWorldIdV4Proof
     }
     if (!toTrimmedString(normalized.action) && action) {
       normalized.action = action;
+    }
+    if (!toTrimmedString(normalized.signal_hash) && signalHash) {
+      normalized.signal_hash = signalHash;
     }
     return normalized;
   });
