@@ -97,7 +97,36 @@ function buildWorldProofFromIdKit(result: ISuccessResult): Record<string, unknow
   return rawResult;
 }
 
-function buildWorldProofFromMiniKit(payload: MiniAppVerifyActionPayload): Record<string, unknown> | null {
+function readLegacyMiniKitProofPayload(
+  payload: MiniAppVerifyActionPayload
+): { merkleRoot: string; nullifierHash: string; proof: string; verificationLevel?: string } | null {
+  if (payload.status !== "success") {
+    return null;
+  }
+
+  const rawPayload = payload as unknown as Record<string, unknown>;
+  const proof = typeof rawPayload.proof === "string" ? rawPayload.proof.trim() : "";
+  const nullifierHash = typeof rawPayload.nullifier_hash === "string" ? rawPayload.nullifier_hash.trim() : "";
+  const merkleRoot = typeof rawPayload.merkle_root === "string" ? rawPayload.merkle_root.trim() : "";
+  const verificationLevel =
+    typeof rawPayload.verification_level === "string" ? rawPayload.verification_level.trim() : undefined;
+
+  if (!proof || !nullifierHash || !merkleRoot) {
+    return null;
+  }
+
+  return {
+    merkleRoot,
+    nullifierHash,
+    proof,
+    verificationLevel
+  };
+}
+
+function buildWorldProofFromMiniKit(
+  payload: MiniAppVerifyActionPayload,
+  input: { action: string; signal: string; nonceHint?: string }
+): Record<string, unknown> | null {
   if (payload.status !== "success") {
     return null;
   }
@@ -108,7 +137,30 @@ function buildWorldProofFromMiniKit(payload: MiniAppVerifyActionPayload): Record
     return rawPayload;
   }
 
-  return null;
+  const legacyPayload = readLegacyMiniKitProofPayload(payload);
+  if (!legacyPayload) {
+    return null;
+  }
+
+  // MiniKit verify can still return legacy fields. Wrap them into the
+  // World ID 4.0 verify API-compatible shape (protocol_version 3.0).
+  const nonceCandidate = input.nonceHint?.trim();
+  const nonce = nonceCandidate && nonceCandidate.length > 0 ? nonceCandidate : `mini-${Date.now()}-${Math.random()}`;
+
+  return {
+    protocol_version: "3.0",
+    nonce,
+    action: input.action,
+    signal: input.signal,
+    responses: [
+      {
+        nullifier_hash: legacyPayload.nullifierHash,
+        merkle_root: legacyPayload.merkleRoot,
+        proof: legacyPayload.proof,
+        verification_level: legacyPayload.verificationLevel
+      }
+    ]
+  };
 }
 
 function formatDebugDetail(value: unknown): string {
@@ -330,6 +382,17 @@ function runMiniVerifyCommand(payload: VerifyCommandInput): Promise<MiniVerifyRe
   });
 }
 
+function toMiniVerifyPayload(value: unknown): MiniAppVerifyActionPayload | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const status = (value as Record<string, unknown>).status;
+  if (status !== "success" && status !== "error") {
+    return null;
+  }
+  return value as MiniAppVerifyActionPayload;
+}
+
 export default function VerifyPage() {
   const activeAccount = useActiveAccount();
   const walletAddress = activeAccount?.address ?? "";
@@ -353,6 +416,7 @@ export default function VerifyPage() {
   const [worldIdDebugLogs, setWorldIdDebugLogs] = useState<WorldIdDebugEntry[]>([]);
   const [miniVerifyMode, setMiniVerifyMode] = useState<MiniVerifyMode>("orb_or_device");
   const miniVerifyInFlightRef = useRef(false);
+  const miniVerifyRawPayloadsRef = useRef<MiniAppVerifyActionPayload[]>([]);
   const [nodeForm, setNodeForm] = useState<{
     selectedModelFamilies: ModelFamily[];
     stakeAmount: string;
@@ -416,6 +480,10 @@ export default function VerifyPage() {
   useEffect(() => {
     installMiniKitRawDebugHook((event, payload) => {
       if (event === "miniapp-verify-action") {
+        const parsedPayload = toMiniVerifyPayload(payload);
+        if (parsedPayload) {
+          miniVerifyRawPayloadsRef.current = [...miniVerifyRawPayloadsRef.current.slice(-9), parsedPayload];
+        }
         appendWorldIdDebugLog("mini.verify.raw_event", payload);
       }
     });
@@ -544,6 +612,7 @@ export default function VerifyPage() {
       return;
     }
     miniVerifyInFlightRef.current = true;
+    miniVerifyRawPayloadsRef.current = [];
 
     setVerifyingWorldId(true);
     try {
@@ -591,10 +660,37 @@ export default function VerifyPage() {
         finalPayload.status === "error" ? finalPayload : summarizeMiniKitPayload(finalPayload)
       );
 
-      const proof = buildWorldProofFromMiniKit(finalPayload);
+      const proofBuildInput = {
+        action: worldIdConfig.mini.action,
+        signal: walletAddress,
+        nonceHint: typeof commandPayload.timestamp === "string" ? commandPayload.timestamp : undefined
+      };
+      const proofCandidates: Array<{ source: string; payload: MiniAppVerifyActionPayload }> = [
+        { source: "final_payload", payload: finalPayload },
+        ...miniVerifyRawPayloadsRef.current.slice().reverse().map((payload, index) => ({
+          source: `raw_event_${index + 1}`,
+          payload
+        }))
+      ];
+      let proof: Record<string, unknown> | null = null;
+      let proofSource = "none";
+      for (const candidate of proofCandidates) {
+        const builtProof = buildWorldProofFromMiniKit(candidate.payload, proofBuildInput);
+        if (!builtProof) {
+          continue;
+        }
+        proof = builtProof;
+        proofSource = candidate.source;
+        break;
+      }
       if (!proof) {
         throw new Error("world_id_v4_payload_required: miniapp_returned_legacy_payload");
       }
+      appendWorldIdDebugLog("mini.verify.proof_selected", {
+        source: proofSource,
+        candidateCount: proofCandidates.length,
+        proof: summarizeWorldProof(proof)
+      });
 
       await verifyWorldIdWithProof({
         proof,
