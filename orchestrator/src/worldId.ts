@@ -92,6 +92,8 @@ interface VerifyApiResult {
   payload: VerifyApiSuccess | VerifyApiFailure | null;
 }
 
+const WORLD_ID_V3_ALLOWED_IDENTIFIERS = new Set(["orb", "secure_document", "document", "device", "face"]);
+
 function normalizeAddress(value: string): string {
   return getAddress(value).toLowerCase();
 }
@@ -105,6 +107,17 @@ function normalizeClientSource(value: unknown): WorldIdClientSource | undefined 
     return normalized;
   }
   return undefined;
+}
+
+function normalizeWorldIdV3Identifier(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (!WORLD_ID_V3_ALLOWED_IDENTIFIERS.has(normalized)) {
+    return undefined;
+  }
+  return normalized;
 }
 
 function toTrimmedString(value: unknown): string | undefined {
@@ -189,8 +202,7 @@ function parseWorldIdV4Proof(rawInput: WorldIdProofInput): ParsedWorldIdV4ProofP
   const action =
     toTrimmedString(v4Record.action) ??
     toTrimmedString(result?.action) ??
-    toTrimmedString(firstResponse?.action) ??
-    toTrimmedString(firstResponse?.identifier);
+    toTrimmedString(firstResponse?.action);
 
   return {
     rawPayload: v4Record,
@@ -497,6 +509,7 @@ function buildWorldVerifyRequestBody(input: { proofPayload: ParsedWorldIdV4Proof
   }
 
   const action = toTrimmedString(raw.action) ?? input.proofPayload.action;
+  const defaultIdentifier = normalizeWorldIdV3Identifier(input.proofPayload.verificationLevel);
   const responsesRaw = Array.isArray(raw.responses) ? raw.responses : [];
   const normalizedResponses = responsesRaw.map((entry) => {
     const responseRecord = toRecord(entry);
@@ -515,12 +528,16 @@ function buildWorldVerifyRequestBody(input: { proofPayload: ParsedWorldIdV4Proof
       }
     }
 
-    const identifier = toTrimmedString(normalized.identifier) ?? toTrimmedString(normalized.action) ?? action;
+    const identifier =
+      normalizeWorldIdV3Identifier(normalized.identifier) ??
+      normalizeWorldIdV3Identifier(normalized.verification_level) ??
+      normalizeWorldIdV3Identifier(normalized.credential_type) ??
+      defaultIdentifier;
     if (identifier) {
       normalized.identifier = identifier;
-      if (!toTrimmedString(normalized.action)) {
-        normalized.action = identifier;
-      }
+    }
+    if (!toTrimmedString(normalized.action) && action) {
+      normalized.action = action;
     }
     return normalized;
   });

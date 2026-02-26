@@ -161,6 +161,17 @@ function readLegacyMiniKitProofPayload(
   };
 }
 
+function resolveWorldIdCredentialIdentifier(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "orb" || normalized === "secure_document" || normalized === "document" || normalized === "device" || normalized === "face") {
+    return normalized;
+  }
+  return undefined;
+}
+
 function buildWorldProofFromMiniKit(
   payload: MiniAppVerifyActionPayload,
   input: { action: string; signal: string; nonceHint?: string }
@@ -184,6 +195,7 @@ function buildWorldProofFromMiniKit(
   // World ID 4.0 verify API-compatible shape (protocol_version 3.0).
   const nonceCandidate = input.nonceHint?.trim();
   const nonce = nonceCandidate && nonceCandidate.length > 0 ? nonceCandidate : `mini-${Date.now()}-${Math.random()}`;
+  const identifier = resolveWorldIdCredentialIdentifier(legacyPayload.verificationLevel);
 
   return {
     protocol_version: "3.0",
@@ -192,7 +204,7 @@ function buildWorldProofFromMiniKit(
     signal: input.signal,
     responses: [
       {
-        identifier: input.action,
+        identifier,
         nullifier: legacyPayload.nullifierHash,
         nullifier_hash: legacyPayload.nullifierHash,
         merkle_root: legacyPayload.merkleRoot,
