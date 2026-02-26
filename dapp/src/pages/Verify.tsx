@@ -88,9 +88,46 @@ function looksLikeWorldIdV4ProofPayload(value: Record<string, unknown>): boolean
   return false;
 }
 
+function hasWorldIdProofMaterial(value: Record<string, unknown>): boolean {
+  const topLevelProof = typeof value.proof === "string" && value.proof.trim().length > 0;
+  const topLevelNullifier = typeof value.nullifier_hash === "string" && value.nullifier_hash.trim().length > 0;
+  const topLevelMerkleRoot = typeof value.merkle_root === "string" && value.merkle_root.trim().length > 0;
+  if (topLevelProof || topLevelNullifier || topLevelMerkleRoot) {
+    return true;
+  }
+
+  const result = value.result;
+  if (result && typeof result === "object" && !Array.isArray(result)) {
+    const nested = result as Record<string, unknown>;
+    const nestedProof = typeof nested.proof === "string" && nested.proof.trim().length > 0;
+    const nestedNullifier = typeof nested.nullifier_hash === "string" && nested.nullifier_hash.trim().length > 0;
+    const nestedMerkleRoot = typeof nested.merkle_root === "string" && nested.merkle_root.trim().length > 0;
+    if (nestedProof || nestedNullifier || nestedMerkleRoot) {
+      return true;
+    }
+  }
+
+  if (Array.isArray(value.responses)) {
+    for (const entry of value.responses) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        continue;
+      }
+      const response = entry as Record<string, unknown>;
+      const responseProof = typeof response.proof === "string" && response.proof.trim().length > 0;
+      const responseNullifier = typeof response.nullifier_hash === "string" && response.nullifier_hash.trim().length > 0;
+      const responseMerkleRoot = typeof response.merkle_root === "string" && response.merkle_root.trim().length > 0;
+      if (responseProof || responseNullifier || responseMerkleRoot) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 function buildWorldProofFromIdKit(result: ISuccessResult): Record<string, unknown> {
   const rawResult = result as unknown as Record<string, unknown>;
-  if (!looksLikeWorldIdV4ProofPayload(rawResult)) {
+  if (!looksLikeWorldIdV4ProofPayload(rawResult) || !hasWorldIdProofMaterial(rawResult)) {
     throw new Error("world_id_v4_payload_required: external_widget_returned_legacy_payload");
   }
   // World ID 4.0: forward completion payload as-is to backend verify.
@@ -132,7 +169,7 @@ function buildWorldProofFromMiniKit(
   }
 
   const rawPayload = payload as unknown as Record<string, unknown>;
-  if (looksLikeWorldIdV4ProofPayload(rawPayload)) {
+  if (looksLikeWorldIdV4ProofPayload(rawPayload) && hasWorldIdProofMaterial(rawPayload)) {
     // Forward World ID 4.0-compatible payloads without reshaping.
     return rawPayload;
   }
@@ -666,11 +703,11 @@ export default function VerifyPage() {
         nonceHint: typeof commandPayload.timestamp === "string" ? commandPayload.timestamp : undefined
       };
       const proofCandidates: Array<{ source: string; payload: MiniAppVerifyActionPayload }> = [
-        { source: "final_payload", payload: finalPayload },
         ...miniVerifyRawPayloadsRef.current.slice().reverse().map((payload, index) => ({
           source: `raw_event_${index + 1}`,
           payload
-        }))
+        })),
+        { source: "final_payload", payload: finalPayload }
       ];
       let proof: Record<string, unknown> | null = null;
       let proofSource = "none";

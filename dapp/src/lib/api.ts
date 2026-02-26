@@ -181,15 +181,27 @@ function appendWorldIdTokenHeader(headers: Record<string, string>, worldIdToken?
 }
 
 async function requestJson<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(buildApiUrl(path), {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(options?.headers || {})
-    }
-  });
+  const requestUrl = buildApiUrl(path);
+  let response: Response;
+  try {
+    response = await fetch(requestUrl, {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        ...(options?.headers || {})
+      }
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`network_error: request to '${requestUrl}' failed (${detail})`);
+  }
 
-  const payload = (await response.json()) as ApiEnvelope<T>;
+  let payload: ApiEnvelope<T>;
+  try {
+    payload = (await response.json()) as ApiEnvelope<T>;
+  } catch {
+    throw new Error(`invalid_api_response: '${requestUrl}' returned non-JSON (HTTP ${response.status})`);
+  }
 
   if (!response.ok || !payload.ok || !payload.data) {
     const detail = typeof payload.detail === "string" ? payload.detail.trim() : "";
