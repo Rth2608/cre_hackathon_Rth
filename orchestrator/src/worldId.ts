@@ -740,6 +740,18 @@ export async function validateWorldIdSessionToken(input: {
   token: string;
   walletAddress: string;
 }): Promise<{ ok: true; session: WorldIdSession } | { ok: false; reason: string }> {
+  return validateWorldIdSessionTokenInternal({
+    token: input.token,
+    walletAddress: input.walletAddress,
+    consume: false
+  });
+}
+
+async function validateWorldIdSessionTokenInternal(input: {
+  token: string;
+  walletAddress: string;
+  consume: boolean;
+}): Promise<{ ok: true; session: WorldIdSession } | { ok: false; reason: string }> {
   const token = input.token.trim();
   if (!token) {
     return { ok: false, reason: "world_id_token_required" };
@@ -760,8 +772,25 @@ export async function validateWorldIdSessionToken(input: {
     return { ok: false, reason: "world_id_token_wallet_mismatch" };
   }
 
+  const publicSession = toPublicSession(session);
+  if (input.consume) {
+    delete db.sessions[token];
+    await saveDb(db);
+  }
+
   return {
     ok: true,
-    session: toPublicSession(session)
+    session: publicSession
   };
+}
+
+export async function consumeWorldIdSessionToken(input: {
+  token: string;
+  walletAddress: string;
+}): Promise<{ ok: true; session: WorldIdSession } | { ok: false; reason: string }> {
+  return validateWorldIdSessionTokenInternal({
+    token: input.token,
+    walletAddress: input.walletAddress,
+    consume: true
+  });
 }

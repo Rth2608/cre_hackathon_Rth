@@ -219,13 +219,20 @@ export async function createRequest(input: MarketRequestInput): Promise<RequestR
   });
 }
 
-export async function createRequestForWallet(input: MarketRequestInput, walletAddress: string): Promise<RequestRecord> {
+export async function createRequestForWallet(
+  input: MarketRequestInput,
+  walletAddress: string,
+  worldIdToken?: string
+): Promise<RequestRecord> {
   return requestJson<RequestRecord>("/api/requests", {
     method: "POST",
-    headers: {
-      "x-wallet-address": walletAddress,
-      "payment-signature": `mock-${walletAddress}-${Date.now()}`
-    },
+    headers: appendWorldIdTokenHeader(
+      {
+        "x-wallet-address": walletAddress,
+        "payment-signature": `mock-${walletAddress}-${Date.now()}`
+      },
+      worldIdToken
+    ),
     body: JSON.stringify(input)
   });
 }

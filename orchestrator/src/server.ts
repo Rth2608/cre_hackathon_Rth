@@ -17,7 +17,12 @@ import { buildNextPorProofInput, getPorStatusSnapshot } from "./por";
 import { getRequest, listRequests, saveRequest } from "./storage";
 import { generateRequestId, hashObject, nowIso, resolveProjectPath } from "./utils";
 import { ValidationError, validateMarketRequest } from "./validator";
-import { issueWorldIdSessionFromProof, isWorldIdAssumeEnabled, validateWorldIdSessionToken } from "./worldId";
+import {
+  consumeWorldIdSessionToken,
+  issueWorldIdSessionFromProof,
+  isWorldIdAssumeEnabled,
+  validateWorldIdSessionToken
+} from "./worldId";
 import { enforceX402Payment } from "./x402";
 
 const PORT = Number.parseInt(process.env.PORT ?? "8787", 10);
@@ -134,7 +139,8 @@ function resolveDistributedDonMode(): boolean {
 
 async function requireWorldIdForWallet(
   req: Request,
-  walletAddress: string
+  walletAddress: string,
+  options?: { consumeToken?: boolean }
 ): Promise<{ ok: true } | { ok: false; status: number; error: string; detail?: string }> {
   if (isWorldIdAssumeEnabled()) {
     return { ok: true };
@@ -150,10 +156,15 @@ async function requireWorldIdForWallet(
     };
   }
 
-  const validation = await validateWorldIdSessionToken({
-    token,
-    walletAddress
-  });
+  const validation = options?.consumeToken
+    ? await consumeWorldIdSessionToken({
+        token,
+        walletAddress
+      })
+    : await validateWorldIdSessionToken({
+        token,
+        walletAddress
+      });
   if (!validation.ok) {
     return {
       ok: false,
@@ -545,6 +556,18 @@ async function handleCreateRequest(req: Request): Promise<Response> {
     const body = await parseJsonBody<MarketRequestInput>(req);
     const validated = await validateMarketRequest(body);
 
+    const worldIdAuth = await requireWorldIdForWallet(req, validated.submitterAddress);
+    if (!worldIdAuth.ok) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: worldIdAuth.error,
+          detail: worldIdAuth.detail
+        },
+        worldIdAuth.status
+      );
+    }
+
     const paymentResult = await enforceX402Payment(req, {
       resource: "/api/requests",
       price: resolveRequestVerificationPrice(),
@@ -552,6 +575,18 @@ async function handleCreateRequest(req: Request): Promise<Response> {
     });
     if (!paymentResult.ok) {
       return paymentResult.response ?? jsonResponse({ ok: false, error: "payment_failed" }, 402);
+    }
+
+    const worldIdConsumeAuth = await requireWorldIdForWallet(req, validated.submitterAddress, { consumeToken: true });
+    if (!worldIdConsumeAuth.ok) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: worldIdConsumeAuth.error,
+          detail: worldIdConsumeAuth.detail
+        },
+        worldIdConsumeAuth.status
+      );
     }
 
     const timestamp = nowIso();

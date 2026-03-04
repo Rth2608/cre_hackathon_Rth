@@ -347,6 +347,71 @@ button:disabled {
   color: #d7e7f8;
 }
 
+.snapshot-grid {
+  margin-top: 0.3rem;
+  display: grid;
+  gap: 0.62rem;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.snapshot-item {
+  border: 1px solid rgba(83, 121, 165, 0.35);
+  border-radius: 12px;
+  background: rgba(11, 20, 36, 0.65);
+  padding: 0.62rem 0.68rem;
+}
+
+.snapshot-label {
+  margin: 0;
+  color: #9fdfff;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.snapshot-copy-btn {
+  margin-top: 0.35rem;
+}
+
+.snapshot-capabilities {
+  margin-top: 0.72rem;
+  border-top: 1px solid rgba(83, 121, 165, 0.28);
+  padding-top: 0.62rem;
+}
+
+.snapshot-capability-list {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.snapshot-capability {
+  margin: 0;
+  border: 1px solid rgba(83, 121, 165, 0.42);
+  border-radius: 10px;
+  padding: 0.46rem 0.55rem;
+  background: rgba(13, 24, 42, 0.82);
+  font-size: 0.78rem;
+  color: #b9d4f3;
+}
+
+.snapshot-capability.ok {
+  color: #6cf8d6;
+  border-color: rgba(57, 227, 165, 0.44);
+  background: rgba(27, 110, 79, 0.14);
+}
+
+.snapshot-capability.warn {
+  color: #ffbf86;
+  border-color: rgba(255, 184, 116, 0.4);
+  background: rgba(125, 72, 26, 0.2);
+}
+
+.token-balance-list {
+  display: grid;
+  gap: 0.2rem;
+}
+
 .family-picker {
   margin: 0;
   border: 1px solid rgba(83, 121, 165, 0.46);

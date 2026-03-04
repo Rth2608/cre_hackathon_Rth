@@ -17,7 +17,7 @@ import {
   type VerifyCommandPayload,
   VerificationLevel as MiniKitVerificationLevel
 } from "@worldcoin/minikit-js";
-import { ConnectButton, useActiveAccount } from "thirdweb/react";
+import { ConnectButton, useActiveAccount, useActiveWalletChain, useWalletBalance } from "thirdweb/react";
 import { signMessage } from "thirdweb/utils";
 import AppNav from "../components/AppNav";
 import {
@@ -34,10 +34,16 @@ import {
 import { formatKnownMiniKitMessage } from "../lib/miniKitErrors";
 import { clearWorldIdSession, getWorldIdConfig, loadWorldIdSession, saveWorldIdSession } from "../lib/worldId";
 import { isThirdwebClientConfigured, thirdwebClient } from "../lib/thirdweb";
+import {
+  fetchWorldChainVirtualBalances,
+  getWorldChainVirtualConfig,
+  type WorldChainVirtualBalanceSnapshot
+} from "../lib/worldChain";
 
 const MODEL_FAMILIES = ["gpt", "gemini", "claude", "grok"] as const;
 type ModelFamily = (typeof MODEL_FAMILIES)[number];
 type MiniVerifyMode = "orb" | "device" | "orb_or_device";
+const STAKE_TOKEN_ADDRESS = (import.meta.env.VITE_STAKE_TOKEN_ADDRESS || "").trim();
 
 interface WorldIdDebugEntry {
   at: string;
@@ -62,6 +68,31 @@ function formatEndpointHealth(node: RegisteredNode): string {
   const latency = typeof node.endpointLatencyMs === "number" ? `${node.endpointLatencyMs}ms` : "-";
   const error = node.endpointLastError ? ` / ${node.endpointLastError}` : "";
   return `${node.endpointStatus} (${latency})${error}`;
+}
+
+function formatShortAddress(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length < 12) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, 6)}...${trimmed.slice(-4)}`;
+}
+
+function formatRemainingDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return "expired";
+  }
+  const totalMinutes = Math.floor(ms / 60000);
+  const days = Math.floor(totalMinutes / (60 * 24));
+  const hours = Math.floor((totalMinutes % (60 * 24)) / 60);
+  const minutes = totalMinutes % 60;
+  if (days > 0) {
+    return `${days}d ${hours}h`;
+  }
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  return `${minutes}m`;
 }
 
 function looksLikeWorldIdV4ProofPayload(value: Record<string, unknown>): boolean {
@@ -481,12 +512,34 @@ function toMiniVerifyPayload(value: unknown): MiniAppVerifyActionPayload | null 
 
 export default function VerifyPage() {
   const activeAccount = useActiveAccount();
+  const activeChain = useActiveWalletChain();
   const walletAddress = activeAccount?.address ?? "";
   const walletConnected = walletAddress.length > 0;
   const thirdwebConfigured = isThirdwebClientConfigured();
+  const { data: walletBalance, isLoading: walletBalanceLoading, isError: walletBalanceError } = useWalletBalance({
+    chain: activeChain ?? undefined,
+    address: walletConnected ? walletAddress : undefined,
+    client: thirdwebClient
+  });
+  const {
+    data: stakeTokenBalance,
+    isLoading: stakeTokenBalanceLoading,
+    isError: stakeTokenBalanceError
+  } = useWalletBalance(
+    {
+      chain: activeChain ?? undefined,
+      address: walletConnected ? walletAddress : undefined,
+      client: thirdwebClient,
+      tokenAddress: STAKE_TOKEN_ADDRESS || undefined
+    },
+    {
+      enabled: Boolean(STAKE_TOKEN_ADDRESS) && walletConnected && Boolean(activeChain)
+    }
+  );
   const worldIdConfig = getWorldIdConfig();
   const miniWorldIdConfigured = worldIdConfig.mini.configured;
   const externalWorldIdConfigured = worldIdConfig.external.configured;
+  const worldChainVirtualConfig = getWorldChainVirtualConfig();
 
   const [requests, setRequests] = useState<RequestRecord[]>([]);
   const [nodes, setNodes] = useState<RegisteredNode[]>([]);
@@ -500,9 +553,13 @@ export default function VerifyPage() {
   const [miniKitAvailable, setMiniKitAvailable] = useState(false);
   const [worldIdSession, setWorldIdSession] = useState<WorldIdSession | null>(null);
   const [worldIdDebugLogs, setWorldIdDebugLogs] = useState<WorldIdDebugEntry[]>([]);
+  const [worldChainBalances, setWorldChainBalances] = useState<WorldChainVirtualBalanceSnapshot | null>(null);
+  const [worldChainBalancesLoading, setWorldChainBalancesLoading] = useState(false);
+  const [worldChainBalancesError, setWorldChainBalancesError] = useState<string | null>(null);
   const [miniVerifyMode, setMiniVerifyMode] = useState<MiniVerifyMode>("orb_or_device");
   const miniVerifyInFlightRef = useRef(false);
   const miniVerifyRawPayloadsRef = useRef<MiniAppVerifyActionPayload[]>([]);
+  const [walletAddressCopied, setWalletAddressCopied] = useState(false);
   const [nodeForm, setNodeForm] = useState<{
     selectedModelFamilies: ModelFamily[];
     stakeAmount: string;
@@ -538,6 +595,43 @@ export default function VerifyPage() {
     }
     setWorldIdSession(loadWorldIdSession(walletAddress));
   }, [walletAddress, walletConnected]);
+
+  useEffect(() => {
+    if (!walletConnected || !thirdwebConfigured) {
+      setWorldChainBalances(null);
+      setWorldChainBalancesError(null);
+      setWorldChainBalancesLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setWorldChainBalancesLoading(true);
+    setWorldChainBalancesError(null);
+
+    void fetchWorldChainVirtualBalances(walletAddress)
+      .then((snapshot) => {
+        if (cancelled) {
+          return;
+        }
+        setWorldChainBalances(snapshot);
+      })
+      .catch((fetchError) => {
+        if (cancelled) {
+          return;
+        }
+        setWorldChainBalancesError(fetchError instanceof Error ? fetchError.message : String(fetchError));
+      })
+      .finally(() => {
+        if (cancelled) {
+          return;
+        }
+        setWorldChainBalancesLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [walletAddress, walletConnected, thirdwebConfigured]);
 
   useEffect(() => {
     if (!miniWorldIdConfigured || !walletConnected) {
@@ -906,6 +1000,80 @@ export default function VerifyPage() {
     [nodes, walletAddress]
   );
 
+  const nativeBalanceText =
+    walletBalanceLoading
+      ? "Loading..."
+      : walletBalance
+        ? `${walletBalance.displayValue} ${walletBalance.symbol}`
+        : walletBalanceError
+          ? "Failed to load"
+          : "-";
+  const stakeTokenBalanceText =
+    !STAKE_TOKEN_ADDRESS
+      ? "Not configured"
+      : stakeTokenBalanceLoading
+        ? "Loading..."
+        : stakeTokenBalance
+          ? `${stakeTokenBalance.displayValue} ${stakeTokenBalance.symbol}`
+          : stakeTokenBalanceError
+            ? "Failed to load"
+            : "-";
+  const chainText = activeChain ? `${activeChain.name} (id: ${activeChain.id})` : "Not connected";
+  const worldIdStatus = worldIdSession
+    ? `Verified (${worldIdSession.verificationLevel ?? "unknown"})`
+    : "Not verified";
+  const worldIdRemaining =
+    worldIdSession && Number.isFinite(Date.parse(worldIdSession.expiresAt))
+      ? formatRemainingDuration(Date.parse(worldIdSession.expiresAt) - Date.now())
+      : "-";
+  const nodeStatusText = myActiveNode ? `ACTIVE / ${formatEndpointHealth(myActiveNode)}` : "NOT REGISTERED";
+  const canCreateRequest = walletConnected && thirdwebConfigured;
+  const canRegisterNode =
+    walletConnected && thirdwebConfigured && Boolean(worldIdSession?.token) && nodeForm.selectedModelFamilies.length > 0;
+  const canSendHeartbeat = walletConnected && Boolean(myActiveNode?.endpointUrl);
+
+  const createRequestReason = !walletConnected
+    ? "Connect wallet"
+    : !thirdwebConfigured
+      ? "Set VITE_THIRDWEB_CLIENT_ID"
+      : "Ready";
+  const registerNodeReason = !walletConnected
+    ? "Connect wallet"
+    : !thirdwebConfigured
+      ? "Set VITE_THIRDWEB_CLIENT_ID"
+      : !worldIdSession?.token
+        ? "Complete World ID verification"
+        : nodeForm.selectedModelFamilies.length === 0
+          ? "Select at least one model"
+          : "Ready";
+  const heartbeatReason = !walletConnected
+    ? "Connect wallet"
+    : !myActiveNode
+      ? "Activate node first"
+      : !myActiveNode.endpointUrl
+        ? "Node endpoint missing"
+        : "Ready";
+  const worldChainNativeBalanceText = worldChainBalancesLoading
+    ? "Loading..."
+    : worldChainBalances?.native
+      ? `${worldChainBalances.native.displayValue} ${worldChainBalances.native.symbol}`
+      : worldChainBalancesError
+        ? "Failed to load"
+        : "-";
+
+  const onCopyWalletAddress = async () => {
+    if (!walletConnected || !walletAddress) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(walletAddress);
+      setWalletAddressCopied(true);
+      window.setTimeout(() => setWalletAddressCopied(false), 1200);
+    } catch {
+      setWalletAddressCopied(false);
+    }
+  };
+
   const onSendHeartbeat = async () => {
     setRegistrationMessage(null);
 
@@ -988,6 +1156,18 @@ export default function VerifyPage() {
               </p>
             )}
             {walletConnected && <p className="wallet-info mono">Connected: {walletAddress}</p>}
+            {walletConnected && (
+              <p className="wallet-info mono">
+                Balance:{" "}
+                {walletBalanceLoading
+                  ? "Loading..."
+                  : walletBalance
+                    ? `${walletBalance.displayValue} ${walletBalance.symbol}`
+                    : walletBalanceError
+                      ? "Failed to load"
+                      : "-"}
+              </p>
+            )}
           </div>
           <div className="inline-row">
             <Link to="/" className="text-link">
@@ -998,6 +1178,95 @@ export default function VerifyPage() {
             </button>
           </div>
         </header>
+
+        <section className="status-card">
+          <h2>Wallet & Access Snapshot</h2>
+          <div className="snapshot-grid">
+            <div className="snapshot-item">
+              <p className="snapshot-label">Wallet</p>
+              <p className="wallet-info mono">{walletConnected ? walletAddress : "-"}</p>
+              {walletConnected && (
+                <button type="button" className="secondary snapshot-copy-btn" onClick={onCopyWalletAddress}>
+                  {walletAddressCopied ? "Copied" : "Copy Address"}
+                </button>
+              )}
+            </div>
+            <div className="snapshot-item">
+              <p className="snapshot-label">Short Address</p>
+              <p className="wallet-info mono">{walletConnected ? formatShortAddress(walletAddress) : "-"}</p>
+            </div>
+            <div className="snapshot-item">
+              <p className="snapshot-label">Network</p>
+              <p className="wallet-info">{chainText}</p>
+            </div>
+            <div className="snapshot-item">
+              <p className="snapshot-label">Native Balance</p>
+              <p className="wallet-info mono">{nativeBalanceText}</p>
+            </div>
+            <div className="snapshot-item">
+              <p className="snapshot-label">Stake Token Balance</p>
+              <p className="wallet-info mono">{stakeTokenBalanceText}</p>
+              {!STAKE_TOKEN_ADDRESS && <p className="config-warning">Set VITE_STAKE_TOKEN_ADDRESS to enable.</p>}
+            </div>
+            <div className="snapshot-item">
+              <p className="snapshot-label">World ID</p>
+              <p className="wallet-info">{worldIdStatus}</p>
+              <p className="wallet-info small">
+                expires in {worldIdRemaining}
+                {worldIdSession?.expiresAt ? ` / ${new Date(worldIdSession.expiresAt).toLocaleString()}` : ""}
+              </p>
+            </div>
+            <div className="snapshot-item">
+              <p className="snapshot-label">Node Status</p>
+              <p className="wallet-info">{nodeStatusText}</p>
+            </div>
+            <div className="snapshot-item">
+              <p className="snapshot-label">World Chain Sepolia</p>
+              <p className="wallet-info">chain id: {worldChainVirtualConfig.chainId}</p>
+              <p className="wallet-info small mono">
+                rpc: {worldChainVirtualConfig.rpcUrl || "thirdweb default rpc"}
+              </p>
+              <p className="wallet-info mono">native: {worldChainNativeBalanceText}</p>
+            </div>
+            <div className="snapshot-item">
+              <p className="snapshot-label">Virtual Token Balances</p>
+              {!thirdwebConfigured ? (
+                <p className="config-warning">Set VITE_THIRDWEB_CLIENT_ID first.</p>
+              ) : worldChainVirtualConfig.tokenAddresses.length === 0 ? (
+                <p className="config-warning">
+                  Set <code>VITE_WORLDCHAIN_VIRTUAL_TOKEN_ADDRESSES</code> to show ERC20 test token balances.
+                </p>
+              ) : worldChainBalancesLoading ? (
+                <p className="wallet-info mono">Loading token balances...</p>
+              ) : worldChainBalancesError ? (
+                <p className="config-warning">Failed to load: {worldChainBalancesError}</p>
+              ) : (
+                <div className="token-balance-list">
+                  {(worldChainBalances?.tokens ?? []).map((item) => (
+                    <p key={item.tokenAddress} className="wallet-info mono small">
+                      {item.tokenAddress}:{" "}
+                      {item.balance ? `${item.balance.displayValue} ${item.balance.symbol}` : item.error ? "Failed" : "-"}
+                    </p>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="snapshot-capabilities">
+            <p className="snapshot-label">Current Availability</p>
+            <div className="snapshot-capability-list">
+              <p className={`snapshot-capability ${canCreateRequest ? "ok" : "warn"}`}>
+                Request Create: {canCreateRequest ? "READY" : "BLOCKED"} ({createRequestReason})
+              </p>
+              <p className={`snapshot-capability ${canRegisterNode ? "ok" : "warn"}`}>
+                Node Register: {canRegisterNode ? "READY" : "BLOCKED"} ({registerNodeReason})
+              </p>
+              <p className={`snapshot-capability ${canSendHeartbeat ? "ok" : "warn"}`}>
+                Node Heartbeat: {canSendHeartbeat ? "READY" : "BLOCKED"} ({heartbeatReason})
+              </p>
+            </div>
+          </div>
+        </section>
 
         <section className="status-card">
           <h2>World ID Verification</h2>
