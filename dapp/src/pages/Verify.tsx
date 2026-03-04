@@ -37,6 +37,7 @@ import { isThirdwebClientConfigured, thirdwebClient } from "../lib/thirdweb";
 import {
   fetchWorldChainVirtualBalances,
   getWorldChainVirtualConfig,
+  worldChainSepoliaChain,
   type WorldChainVirtualBalanceSnapshot
 } from "../lib/worldChain";
 
@@ -517,7 +518,7 @@ export default function VerifyPage() {
   const walletConnected = walletAddress.length > 0;
   const thirdwebConfigured = isThirdwebClientConfigured();
   const { data: walletBalance, isLoading: walletBalanceLoading, isError: walletBalanceError } = useWalletBalance({
-    chain: activeChain ?? undefined,
+    chain: worldChainSepoliaChain,
     address: walletConnected ? walletAddress : undefined,
     client: thirdwebClient
   });
@@ -527,13 +528,13 @@ export default function VerifyPage() {
     isError: stakeTokenBalanceError
   } = useWalletBalance(
     {
-      chain: activeChain ?? undefined,
+      chain: worldChainSepoliaChain,
       address: walletConnected ? walletAddress : undefined,
       client: thirdwebClient,
       tokenAddress: STAKE_TOKEN_ADDRESS || undefined
     },
     {
-      enabled: Boolean(STAKE_TOKEN_ADDRESS) && walletConnected && Boolean(activeChain)
+      enabled: Boolean(STAKE_TOKEN_ADDRESS) && walletConnected
     }
   );
   const worldIdConfig = getWorldIdConfig();
@@ -1018,7 +1019,9 @@ export default function VerifyPage() {
           : stakeTokenBalanceError
             ? "Failed to load"
             : "-";
-  const chainText = activeChain ? `${activeChain.name} (id: ${activeChain.id})` : "Not connected";
+  const chainText = `World Chain Sepolia (virtual, id: ${worldChainVirtualConfig.chainId})`;
+  const connectedChainText = activeChain ? `${activeChain.name} (id: ${activeChain.id})` : "Not connected";
+  const connectedChainMismatch = Boolean(activeChain && activeChain.id !== worldChainVirtualConfig.chainId);
   const worldIdStatus = worldIdSession
     ? `Verified (${worldIdSession.verificationLevel ?? "unknown"})`
     : "Not verified";
@@ -1148,6 +1151,7 @@ export default function VerifyPage() {
             {thirdwebConfigured ? (
               <ConnectButton
                 client={thirdwebClient}
+                chains={[worldChainSepoliaChain]}
                 connectButton={{ className: "wallet-connect-btn", label: "Connect Wallet" }}
               />
             ) : (
@@ -1158,7 +1162,7 @@ export default function VerifyPage() {
             {walletConnected && <p className="wallet-info mono">Connected: {walletAddress}</p>}
             {walletConnected && (
               <p className="wallet-info mono">
-                Balance:{" "}
+                Virtual Balance (World Chain Sepolia):{" "}
                 {walletBalanceLoading
                   ? "Loading..."
                   : walletBalance
@@ -1198,6 +1202,12 @@ export default function VerifyPage() {
             <div className="snapshot-item">
               <p className="snapshot-label">Network</p>
               <p className="wallet-info">{chainText}</p>
+              <p className="wallet-info small">Connected wallet chain: {connectedChainText}</p>
+              {connectedChainMismatch && (
+                <p className="config-warning">
+                  Connected chain differs. Balance/verification display is fixed to virtual World Chain Sepolia.
+                </p>
+              )}
             </div>
             <div className="snapshot-item">
               <p className="snapshot-label">Native Balance</p>
