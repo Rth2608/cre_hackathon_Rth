@@ -567,7 +567,7 @@ export default function SubmitPage() {
         : "-";
 
   const runExternalProofFlow = (): Promise<Record<string, unknown>> => {
-    if (isWorldAppMiniRuntime()) {
+    if (worldAppMiniRuntime) {
       return Promise.reject(new Error("minikit_command_unavailable: verify"));
     }
     if (!worldIdConfig.external.configured) {
@@ -607,7 +607,6 @@ export default function SubmitPage() {
       throw new Error("wallet_account_required");
     }
 
-    const worldAppMiniRuntime = isWorldAppMiniRuntime();
     miniVerifyRawPayloadsRef.current = [];
     const requestedVerificationLevel: [MiniKitVerificationLevel, MiniKitVerificationLevel] = [
       MiniKitVerificationLevel.Orb,
