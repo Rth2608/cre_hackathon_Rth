@@ -800,7 +800,6 @@ export default function VerifyPage() {
         const errorCode = installResult.success ? "unknown" : installResult.errorCode;
         throw new Error(`minikit_unavailable: ${errorCode}`);
       }
-      setMiniKitAvailable(true);
       const runtimeMiniAppId = readMiniKitRuntimeAppId();
       const verifyAvailable = isCommandAvailable(Command.Verify);
       appendWorldIdDebugLog("mini.command.availability", {
