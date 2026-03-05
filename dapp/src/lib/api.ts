@@ -273,14 +273,16 @@ function appendWorldIdTokenHeader(headers: Record<string, string>, worldIdToken?
 
 async function requestJson<T>(path: string, options?: RequestInit): Promise<T> {
   const requestUrl = buildApiUrl(path);
+  const headers = new Headers(options?.headers);
+  const hasBody = options?.body !== undefined && options?.body !== null;
+  if (hasBody && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
   let response: Response;
   try {
     response = await fetch(requestUrl, {
       ...options,
-      headers: {
-        "Content-Type": "application/json",
-        ...(options?.headers || {})
-      }
+      headers
     });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
