@@ -554,6 +554,7 @@ export default function VerifyPage() {
   const [registrationMessage, setRegistrationMessage] = useState<string | null>(null);
   const [verifyingWorldId, setVerifyingWorldId] = useState(false);
   const [worldProofJson, setWorldProofJson] = useState("");
+  const [miniKitAvailable, setMiniKitAvailable] = useState(false);
   const [worldIdSession, setWorldIdSession] = useState<WorldIdSession | null>(null);
   const [worldIdDebugLogs, setWorldIdDebugLogs] = useState<WorldIdDebugEntry[]>([]);
   const [worldChainBalances, setWorldChainBalances] = useState<WorldChainVirtualBalanceSnapshot | null>(null);
@@ -635,6 +636,21 @@ export default function VerifyPage() {
       cancelled = true;
     };
   }, [walletAddress, walletConnected, thirdwebConfigured]);
+
+  useEffect(() => {
+    if (!walletConnected || !miniWorldIdConfigured || !worldAppMiniRuntime) {
+      setMiniKitAvailable(false);
+      return;
+    }
+
+    try {
+      const installResult = installMiniKitWithAppId(worldIdConfig.mini.appId);
+      const verifyAvailable = isCommandAvailable(Command.Verify);
+      setMiniKitAvailable(isMiniKitInstallUsable(installResult) && verifyAvailable);
+    } catch {
+      setMiniKitAvailable(false);
+    }
+  }, [walletConnected, miniWorldIdConfigured, worldAppMiniRuntime, worldIdConfig.mini.appId]);
 
   const appendWorldIdDebugLog = (event: string, detail?: unknown) => {
     const entry: WorldIdDebugEntry = {
@@ -1320,10 +1336,27 @@ export default function VerifyPage() {
                 <button
                   type="button"
                   onClick={onVerifyWorldIdMiniApp}
-                  disabled={!walletConnected || verifyingWorldId || !miniWorldIdConfigured}
+                  disabled={!walletConnected || verifyingWorldId || !miniWorldIdConfigured || !miniKitAvailable}
                 >
                   {verifyingWorldId ? "Verifying..." : "Verify in World Mini App"}
                 </button>
+                {externalWorldIdConfigured && !miniKitAvailable && (
+                  <IDKitWidget
+                    app_id={worldIdConfig.external.appId}
+                    action={worldIdConfig.external.action}
+                    signal={walletAddress}
+                    verification_level={IDKitVerificationLevel.Device}
+                    handleVerify={onVerifyWorldIdExternal}
+                    onSuccess={() => undefined}
+                    onError={onWorldIdExternalError}
+                  >
+                    {({ open }: { open: () => void }) => (
+                      <button type="button" className="secondary" onClick={open} disabled={!walletConnected || verifyingWorldId}>
+                        {verifyingWorldId ? "Verifying..." : "Fallback: Verify with External Widget"}
+                      </button>
+                    )}
+                  </IDKitWidget>
+                )}
               </>
             ) : externalWorldIdConfigured ? (
               <IDKitWidget
@@ -1350,6 +1383,11 @@ export default function VerifyPage() {
               Clear Session
             </button>
           </div>
+          {worldAppMiniRuntime && !miniKitAvailable && (
+            <p className="config-warning">
+              World App runtime detected, but MiniKit verify is unavailable in this context. Use fallback external widget.
+            </p>
+          )}
           {!worldAppMiniRuntime && (
             <p className="config-warning">
               Web mode uses external World ID widget (QR). Mini App verification is only available inside World App.

@@ -28,7 +28,7 @@ import {
 import { formatKnownMiniKitMessage } from "../lib/miniKitErrors";
 import { isThirdwebClientConfigured, thirdwebClient } from "../lib/thirdweb";
 import { clearWorldIdSession, getWorldIdConfig, loadWorldIdSession } from "../lib/worldId";
-import { getWorldAppRuntimeMode, isWorldAppMiniRuntime } from "../lib/worldAppRuntime";
+import { getWorldAppRuntimeMode } from "../lib/worldAppRuntime";
 import {
   fetchWorldChainVirtualBalances,
   getWorldChainVirtualConfig,
@@ -260,10 +260,6 @@ function getWorldIdErrorMessage(error: unknown): string {
   if (message === "world_id_external_not_configured") {
     return "External World ID is not configured. Set VITE_WORLD_ID_EXTERNAL_APP_ID and VITE_WORLD_ID_EXTERNAL_ACTION.";
   }
-  if (message === "world_id_external_disabled_inside_worldapp") {
-    return "This page is already running inside World App Mini App. Complete verification in the World App prompt.";
-  }
-
   const normalized = formatKnownMiniKitMessage(message);
   if (normalized) {
     return normalized;
@@ -282,6 +278,14 @@ function shouldFallbackFromMiniToExternal(error: unknown): boolean {
     return false;
   }
   return true;
+}
+
+function isMiniVerifyUnavailableError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    /^minikit_command_unavailable:\s*verify$/i.test(message) ||
+    /^minikit_unavailable:\s*(outside_of_worldapp|not_on_client|app_out_of_date)$/i.test(message)
+  );
 }
 
 function getMiniVerifyErrorCode(payload: MiniAppVerifyActionPayload): string | null {
@@ -557,9 +561,6 @@ export default function SubmitPage() {
         : "-";
 
   const runExternalProofFlow = (): Promise<Record<string, unknown>> => {
-    if (isWorldAppMiniRuntime()) {
-      return Promise.reject(new Error("world_id_external_disabled_inside_worldapp"));
-    }
     if (!worldIdConfig.external.configured) {
       return Promise.reject(new Error("world_id_external_not_configured"));
     }
@@ -587,7 +588,6 @@ export default function SubmitPage() {
       throw new Error("wallet_account_required");
     }
 
-    const worldAppRuntimeAvailable = isWorldAppMiniRuntime();
     miniVerifyRawPayloadsRef.current = [];
     const requestedVerificationLevel: [MiniKitVerificationLevel, MiniKitVerificationLevel] = [
       MiniKitVerificationLevel.Orb,
@@ -660,16 +660,14 @@ export default function SubmitPage() {
           });
           return result.session;
         } catch (miniError) {
+          const allowFallbackOnThisError = isMiniVerifyUnavailableError(miniError);
           if (
-            worldAppRuntimeAvailable ||
             !worldIdConfig.external.configured ||
-            !shouldFallbackFromMiniToExternal(miniError)
+            (!allowFallbackOnThisError && !shouldFallbackFromMiniToExternal(miniError))
           ) {
             throw miniError;
           }
         }
-      } else if (worldAppRuntimeAvailable) {
-        throw new Error("minikit_command_unavailable: verify");
       }
     }
 
@@ -954,7 +952,7 @@ export default function SubmitPage() {
           </div>
         </form>
 
-        {!worldAppMiniRuntime && worldIdConfig.external.configured && (
+        {worldIdConfig.external.configured && (
           <div style={{ display: "none" }}>
             <IDKitWidget
               app_id={worldIdConfig.external.appId}
