@@ -28,6 +28,7 @@ import {
 import { formatKnownMiniKitMessage } from "../lib/miniKitErrors";
 import { isThirdwebClientConfigured, thirdwebClient } from "../lib/thirdweb";
 import { clearWorldIdSession, getWorldIdConfig, loadWorldIdSession } from "../lib/worldId";
+import { getWorldAppRuntimeMode, isWorldAppMiniRuntime } from "../lib/worldAppRuntime";
 import {
   fetchWorldChainVirtualBalances,
   getWorldChainVirtualConfig,
@@ -259,6 +260,9 @@ function getWorldIdErrorMessage(error: unknown): string {
   if (message === "world_id_external_not_configured") {
     return "External World ID is not configured. Set VITE_WORLD_ID_EXTERNAL_APP_ID and VITE_WORLD_ID_EXTERNAL_ACTION.";
   }
+  if (message === "world_id_external_disabled_inside_worldapp") {
+    return "This page is already running inside World App Mini App. Complete verification in the World App prompt.";
+  }
 
   const normalized = formatKnownMiniKitMessage(message);
   if (normalized) {
@@ -418,6 +422,7 @@ export default function SubmitPage() {
   const worldIdConfig = getWorldIdConfig();
   const worldIdConfigured = worldIdConfig.mini.configured || worldIdConfig.external.configured;
   const worldChainVirtualConfig = getWorldChainVirtualConfig();
+  const worldAppMiniRuntime = getWorldAppRuntimeMode() === "miniapp";
 
   const [form, setForm] = useState(defaultForm);
   const [requestId, setRequestId] = useState<string | null>(null);
@@ -552,6 +557,9 @@ export default function SubmitPage() {
         : "-";
 
   const runExternalProofFlow = (): Promise<Record<string, unknown>> => {
+    if (isWorldAppMiniRuntime()) {
+      return Promise.reject(new Error("world_id_external_disabled_inside_worldapp"));
+    }
     if (!worldIdConfig.external.configured) {
       return Promise.reject(new Error("world_id_external_not_configured"));
     }
@@ -579,6 +587,7 @@ export default function SubmitPage() {
       throw new Error("wallet_account_required");
     }
 
+    const worldAppRuntimeAvailable = isWorldAppMiniRuntime();
     miniVerifyRawPayloadsRef.current = [];
     const requestedVerificationLevel: [MiniKitVerificationLevel, MiniKitVerificationLevel] = [
       MiniKitVerificationLevel.Orb,
@@ -651,10 +660,16 @@ export default function SubmitPage() {
           });
           return result.session;
         } catch (miniError) {
-          if (!worldIdConfig.external.configured || !shouldFallbackFromMiniToExternal(miniError)) {
+          if (
+            worldAppRuntimeAvailable ||
+            !worldIdConfig.external.configured ||
+            !shouldFallbackFromMiniToExternal(miniError)
+          ) {
             throw miniError;
           }
         }
+      } else if (worldAppRuntimeAvailable) {
+        throw new Error("minikit_command_unavailable: verify");
       }
     }
 
@@ -766,7 +781,13 @@ export default function SubmitPage() {
             <span className="chip">4 DON Nodes</span>
             <span className="chip">Weighted Consensus</span>
             <span className="chip">Tenderly Finalization</span>
+            <span className="chip">{worldAppMiniRuntime ? "Mini App Mode" : "Web / QR Mode"}</span>
           </div>
+          <p className="config-warning runtime-note">
+            {worldAppMiniRuntime
+              ? "In World App: Submit triggers in-app Mini verification."
+              : "In browser: Submit triggers external World ID QR verification."}
+          </p>
           <div className="wallet-row">
             {thirdwebConfigured ? (
               <ConnectButton
@@ -924,12 +945,16 @@ export default function SubmitPage() {
 
           <div className="action-row">
             <button type="submit" disabled={submitting || !walletConnected || !thirdwebConfigured || !worldIdConfigured}>
-              {submitting ? "Verifying And Submitting..." : "Submit And Verify"}
+              {submitting
+                ? "Verifying And Submitting..."
+                : worldAppMiniRuntime
+                  ? "Submit And Verify (Mini App)"
+                  : "Submit And Verify (QR)"}
             </button>
           </div>
         </form>
 
-        {worldIdConfig.external.configured && (
+        {!worldAppMiniRuntime && worldIdConfig.external.configured && (
           <div style={{ display: "none" }}>
             <IDKitWidget
               app_id={worldIdConfig.external.appId}

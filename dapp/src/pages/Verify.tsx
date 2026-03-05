@@ -33,6 +33,7 @@ import {
 } from "../lib/api";
 import { formatKnownMiniKitMessage } from "../lib/miniKitErrors";
 import { clearWorldIdSession, getWorldIdConfig, loadWorldIdSession, saveWorldIdSession } from "../lib/worldId";
+import { getWorldAppRuntimeMode } from "../lib/worldAppRuntime";
 import { isThirdwebClientConfigured, thirdwebClient } from "../lib/thirdweb";
 import {
   fetchWorldChainVirtualBalances,
@@ -542,6 +543,7 @@ export default function VerifyPage() {
   const miniWorldIdConfigured = worldIdConfig.mini.configured;
   const externalWorldIdConfigured = worldIdConfig.external.configured;
   const worldChainVirtualConfig = getWorldChainVirtualConfig();
+  const worldAppMiniRuntime = getWorldAppRuntimeMode() === "miniapp";
 
   const [requests, setRequests] = useState<RequestRecord[]>([]);
   const [nodes, setNodes] = useState<RegisteredNode[]>([]);
@@ -552,7 +554,6 @@ export default function VerifyPage() {
   const [registrationMessage, setRegistrationMessage] = useState<string | null>(null);
   const [verifyingWorldId, setVerifyingWorldId] = useState(false);
   const [worldProofJson, setWorldProofJson] = useState("");
-  const [miniKitAvailable, setMiniKitAvailable] = useState(false);
   const [worldIdSession, setWorldIdSession] = useState<WorldIdSession | null>(null);
   const [worldIdDebugLogs, setWorldIdDebugLogs] = useState<WorldIdDebugEntry[]>([]);
   const [worldChainBalances, setWorldChainBalances] = useState<WorldChainVirtualBalanceSnapshot | null>(null);
@@ -634,20 +635,6 @@ export default function VerifyPage() {
       cancelled = true;
     };
   }, [walletAddress, walletConnected, thirdwebConfigured]);
-
-  useEffect(() => {
-    if (!miniWorldIdConfigured || !walletConnected) {
-      setMiniKitAvailable(false);
-      return;
-    }
-
-    try {
-      const installResult = installMiniKitWithAppId(worldIdConfig.mini.appId);
-      setMiniKitAvailable(isMiniKitInstallUsable(installResult));
-    } catch {
-      setMiniKitAvailable(false);
-    }
-  }, [walletConnected, miniWorldIdConfigured, worldIdConfig.mini.appId]);
 
   const appendWorldIdDebugLog = (event: string, detail?: unknown) => {
     const entry: WorldIdDebugEntry = {
@@ -1305,6 +1292,11 @@ export default function VerifyPage() {
             Verify with Mini App (World App) or External Widget. A wallet-bound World ID session token is required before node
             activation.
           </p>
+          <p className="config-warning runtime-note">
+            {worldAppMiniRuntime
+              ? "Runtime: World App Mini App (in-app verification flow)"
+              : "Runtime: Web Browser (QR / external widget flow)"}
+          </p>
           <p className="config-warning">
             Mini App: {worldIdConfig.mini.appId || "-"} / {worldIdConfig.mini.action || "-"}
           </p>
@@ -1312,26 +1304,29 @@ export default function VerifyPage() {
             External: {worldIdConfig.external.appId || "-"} / {worldIdConfig.external.action || "-"}
           </p>
           <div className="action-row">
-            <label>
-              Mini Level
-              <select
-                value={miniVerifyMode}
-                onChange={(event) => setMiniVerifyMode(event.target.value as MiniVerifyMode)}
-                disabled={verifyingWorldId}
-              >
-                <option value="orb_or_device">orb_or_device (recommended)</option>
-                <option value="orb">orb only</option>
-                <option value="device">device only</option>
-              </select>
-            </label>
-            <button
-              type="button"
-              onClick={onVerifyWorldIdMiniApp}
-              disabled={!walletConnected || verifyingWorldId || !miniWorldIdConfigured}
-            >
-              {verifyingWorldId ? "Verifying..." : "Verify in World Mini App"}
-            </button>
-            {externalWorldIdConfigured ? (
+            {worldAppMiniRuntime ? (
+              <>
+                <label>
+                  Mini Level
+                  <select
+                    value={miniVerifyMode}
+                    onChange={(event) => setMiniVerifyMode(event.target.value as MiniVerifyMode)}
+                    disabled={verifyingWorldId}
+                  >
+                    <option value="orb_or_device">orb_or_device (recommended)</option>
+                    <option value="orb">orb only</option>
+                    <option value="device">device only</option>
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  onClick={onVerifyWorldIdMiniApp}
+                  disabled={!walletConnected || verifyingWorldId || !miniWorldIdConfigured}
+                >
+                  {verifyingWorldId ? "Verifying..." : "Verify in World Mini App"}
+                </button>
+              </>
+            ) : externalWorldIdConfigured ? (
               <IDKitWidget
                 app_id={worldIdConfig.external.appId}
                 action={worldIdConfig.external.action}
@@ -1343,7 +1338,7 @@ export default function VerifyPage() {
               >
                 {({ open }: { open: () => void }) => (
                   <button type="button" className="secondary" onClick={open} disabled={!walletConnected || verifyingWorldId}>
-                    Verify with External Widget
+                    {verifyingWorldId ? "Verifying..." : "Verify with External Widget"}
                   </button>
                 )}
               </IDKitWidget>
@@ -1356,9 +1351,9 @@ export default function VerifyPage() {
               Clear Session
             </button>
           </div>
-          {!miniKitAvailable && (
+          {!worldAppMiniRuntime && (
             <p className="config-warning">
-              Mini App verification is available only inside World App. For desktop browser testing, use External Widget.
+              Web mode uses external World ID widget (QR). Mini App verification is only available inside World App.
             </p>
           )}
           <details className="manual-world-proof">

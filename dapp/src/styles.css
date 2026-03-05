@@ -201,6 +201,10 @@ body::before {
   font-size: 0.82rem;
 }
 
+.runtime-note {
+  margin-top: 0.2rem;
+}
+
 .config-warning code {
   font-family: "IBM Plex Mono", monospace;
   font-size: 0.8rem;
