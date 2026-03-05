@@ -285,6 +285,9 @@ function getWorldIdErrorMessage(error: unknown): string {
   if (message === "world_id_external_not_configured") {
     return "External World ID is not configured. Set VITE_WORLD_ID_EXTERNAL_APP_ID and VITE_WORLD_ID_EXTERNAL_ACTION.";
   }
+  if (message === "world_id_external_not_supported_in_worldapp_browser") {
+    return "This page is opened inside World App browser context. Reopen from Mini Apps entry and use in-app Mini verification.";
+  }
   const normalized = formatKnownMiniKitMessage(message);
   if (normalized) {
     return normalized;
@@ -313,6 +316,14 @@ function isMiniVerifyUnavailableError(error: unknown): boolean {
   );
 }
 
+function isLikelyWorldAppBrowserContext(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  const userAgent = window.navigator.userAgent.toLowerCase();
+  return userAgent.includes("worldapp") || userAgent.includes("worldcoin");
+}
+
 function getMiniVerifyErrorCode(payload: MiniAppVerifyActionPayload): string | null {
   if (payload.status !== "error") {
     return null;
@@ -332,7 +343,7 @@ function isMiniKitInstallUsable(installResult: MiniKitInstallReturnType): boolea
   if (installResult.success) {
     return true;
   }
-  return installResult.errorCode === "already_installed";
+  return installResult.errorCode === "already_installed" || installResult.errorCode === "app_out_of_date";
 }
 
 function installMiniKitWithAppId(appId: string): MiniKitInstallReturnType {
@@ -592,6 +603,9 @@ export default function SubmitPage() {
   const runExternalProofFlow = (): Promise<Record<string, unknown>> => {
     if (worldAppMiniRuntime) {
       return Promise.reject(new Error("minikit_command_unavailable: verify"));
+    }
+    if (isLikelyWorldAppBrowserContext()) {
+      return Promise.reject(new Error("world_id_external_not_supported_in_worldapp_browser"));
     }
     if (!worldIdConfig.external.configured) {
       return Promise.reject(new Error("world_id_external_not_configured"));
