@@ -267,6 +267,34 @@ function getWorldIdErrorMessage(error: unknown): string {
   return message;
 }
 
+function shouldFallbackFromMiniToExternal(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("A verify request is already in flight")) {
+    return false;
+  }
+  if (
+    /world_id_verify_failed:\s*(verification_rejected|user_rejected|max_verifications_reached)\b/i.test(message)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function getMiniVerifyErrorCode(payload: MiniAppVerifyActionPayload): string | null {
+  if (payload.status !== "error") {
+    return null;
+  }
+  const rawPayload = payload as unknown as Record<string, unknown>;
+  const rawCode =
+    (typeof rawPayload.error_code === "string" ? rawPayload.error_code : undefined) ??
+    (typeof rawPayload.errorCode === "string" ? rawPayload.errorCode : undefined);
+  if (!rawCode) {
+    return null;
+  }
+  const normalized = rawCode.trim().toLowerCase();
+  return normalized.length > 0 ? normalized : null;
+}
+
 function isMiniKitInstallUsable(installResult: MiniKitInstallReturnType): boolean {
   if (installResult.success) {
     return true;
@@ -567,55 +595,66 @@ export default function SubmitPage() {
       }
 
       if (miniAvailable) {
-        const runtimeMiniAppId = readMiniKitRuntimeAppId() || worldIdConfig.mini.appId;
-        const { commandPayload, finalPayload } = await runMiniVerifyCommand({
-          action: worldIdConfig.mini.action,
-          signal: walletAddress,
-          verification_level: requestedVerificationLevel
-        });
+        try {
+          const runtimeMiniAppId = readMiniKitRuntimeAppId() || worldIdConfig.mini.appId;
+          const { commandPayload, finalPayload } = await runMiniVerifyCommand({
+            action: worldIdConfig.mini.action,
+            signal: walletAddress,
+            verification_level: requestedVerificationLevel
+          });
 
-        if (!commandPayload) {
-          throw new Error("minikit_command_unavailable: verify");
-        }
-
-        const proofBuildInput = {
-          action: worldIdConfig.mini.action,
-          signal: walletAddress,
-          signalHashHint: typeof commandPayload.signal === "string" ? commandPayload.signal : undefined,
-          nonceHint: typeof commandPayload.timestamp === "string" ? commandPayload.timestamp : undefined
-        };
-
-        const proofCandidates: Array<{ source: string; payload: MiniAppVerifyActionPayload }> = [
-          ...miniVerifyRawPayloadsRef.current.slice().reverse().map((payload, index) => ({
-            source: `raw_event_${index + 1}`,
-            payload
-          })),
-          { source: "final_payload", payload: finalPayload }
-        ];
-
-        let proof: Record<string, unknown> | null = null;
-        for (const candidate of proofCandidates) {
-          const builtProof = buildWorldProofFromMiniKit(candidate.payload, proofBuildInput);
-          if (!builtProof) {
-            continue;
+          if (!commandPayload) {
+            throw new Error("minikit_command_unavailable: verify");
           }
-          proof = builtProof;
-          break;
-        }
 
-        if (!proof) {
-          throw new Error("world_id_v4_payload_required: miniapp_returned_legacy_payload");
-        }
+          const miniVerifyErrorCode = getMiniVerifyErrorCode(finalPayload);
+          if (miniVerifyErrorCode) {
+            throw new Error(`world_id_verify_failed: ${miniVerifyErrorCode}`);
+          }
 
-        const result = await verifyWorldIdForWallet({
-          walletAddress,
-          proof,
-          appId: runtimeMiniAppId,
-          action: worldIdConfig.mini.action,
-          clientSource: "miniapp",
-          account: activeAccount
-        });
-        return result.session;
+          const proofBuildInput = {
+            action: worldIdConfig.mini.action,
+            signal: walletAddress,
+            signalHashHint: typeof commandPayload.signal === "string" ? commandPayload.signal : undefined,
+            nonceHint: typeof commandPayload.timestamp === "string" ? commandPayload.timestamp : undefined
+          };
+
+          const proofCandidates: Array<{ source: string; payload: MiniAppVerifyActionPayload }> = [
+            ...miniVerifyRawPayloadsRef.current.slice().reverse().map((payload, index) => ({
+              source: `raw_event_${index + 1}`,
+              payload
+            })),
+            { source: "final_payload", payload: finalPayload }
+          ];
+
+          let proof: Record<string, unknown> | null = null;
+          for (const candidate of proofCandidates) {
+            const builtProof = buildWorldProofFromMiniKit(candidate.payload, proofBuildInput);
+            if (!builtProof) {
+              continue;
+            }
+            proof = builtProof;
+            break;
+          }
+
+          if (!proof) {
+            throw new Error("world_id_v4_payload_required: miniapp_returned_legacy_payload");
+          }
+
+          const result = await verifyWorldIdForWallet({
+            walletAddress,
+            proof,
+            appId: runtimeMiniAppId,
+            action: worldIdConfig.mini.action,
+            clientSource: "miniapp",
+            account: activeAccount
+          });
+          return result.session;
+        } catch (miniError) {
+          if (!worldIdConfig.external.configured || !shouldFallbackFromMiniToExternal(miniError)) {
+            throw miniError;
+          }
+        }
       }
     }
 
