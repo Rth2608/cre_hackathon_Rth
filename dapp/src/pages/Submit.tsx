@@ -148,22 +148,45 @@ function readLegacyMiniKitProofPayload(
   }
 
   const rawPayload = payload as unknown as Record<string, unknown>;
-  const proof = typeof rawPayload.proof === "string" ? rawPayload.proof.trim() : "";
-  const nullifierHash = typeof rawPayload.nullifier_hash === "string" ? rawPayload.nullifier_hash.trim() : "";
-  const merkleRoot = typeof rawPayload.merkle_root === "string" ? rawPayload.merkle_root.trim() : "";
-  const verificationLevel =
-    typeof rawPayload.verification_level === "string" ? rawPayload.verification_level.trim() : undefined;
+  const readCandidate = (
+    candidate: Record<string, unknown>
+  ): { merkleRoot: string; nullifierHash: string; proof: string; verificationLevel?: string } | null => {
+    const proof = typeof candidate.proof === "string" ? candidate.proof.trim() : "";
+    const nullifierHash = typeof candidate.nullifier_hash === "string" ? candidate.nullifier_hash.trim() : "";
+    const merkleRoot = typeof candidate.merkle_root === "string" ? candidate.merkle_root.trim() : "";
+    const verificationLevel =
+      typeof candidate.verification_level === "string" ? candidate.verification_level.trim() : undefined;
 
-  if (!proof || !nullifierHash || !merkleRoot) {
-    return null;
+    if (!proof || !nullifierHash || !merkleRoot) {
+      return null;
+    }
+
+    return {
+      merkleRoot,
+      nullifierHash,
+      proof,
+      verificationLevel
+    };
+  };
+
+  const topLevel = readCandidate(rawPayload);
+  if (topLevel) {
+    return topLevel;
   }
 
-  return {
-    merkleRoot,
-    nullifierHash,
-    proof,
-    verificationLevel
-  };
+  if (Array.isArray(rawPayload.verifications)) {
+    for (const entry of rawPayload.verifications) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        continue;
+      }
+      const nested = readCandidate(entry as Record<string, unknown>);
+      if (nested) {
+        return nested;
+      }
+    }
+  }
+
+  return null;
 }
 
 function resolveWorldIdCredentialIdentifier(value: string | undefined): string | undefined {
