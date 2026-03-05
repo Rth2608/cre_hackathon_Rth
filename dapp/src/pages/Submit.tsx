@@ -44,6 +44,7 @@ const defaultForm: MarketRequestInput = {
 
 const MINI_VERIFY_TIMEOUT_MS = 20_000;
 const EXTERNAL_VERIFY_TIMEOUT_MS = 45_000;
+const SUBMIT_FLOW_TIMEOUT_MS = 120_000;
 
 function formatShortAddress(value: string): string {
   const trimmed = value.trim();
@@ -251,6 +252,9 @@ function buildWorldProofFromMiniKit(
 
 function getWorldIdErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
+  if (/^network_timeout:/i.test(message)) {
+    return "Network timeout while contacting backend. Please retry.";
+  }
   if (message.includes("A verify request is already in flight")) {
     return "A World ID verification is already in progress. Finish or close the current World App prompt, then retry.";
   }
@@ -343,7 +347,7 @@ function isMiniKitInstallUsable(installResult: MiniKitInstallReturnType): boolea
   if (installResult.success) {
     return true;
   }
-  return installResult.errorCode === "already_installed" || installResult.errorCode === "app_out_of_date";
+  return installResult.errorCode === "already_installed";
 }
 
 function installMiniKitWithAppId(appId: string): MiniKitInstallReturnType {
@@ -661,6 +665,12 @@ export default function SubmitPage() {
         miniInstallUsable = false;
       }
 
+      const likelyWorldAppContextFromInstall =
+        worldAppMiniRuntime ||
+        miniInstallUsable ||
+        miniInstallErrorCode === "app_out_of_date" ||
+        isLikelyWorldAppBrowserContext();
+
       if (miniInstallUsable) {
         try {
           const runtimeMiniAppId = readMiniKitRuntimeAppId() || worldIdConfig.mini.appId;
@@ -720,14 +730,14 @@ export default function SubmitPage() {
         } catch (miniError) {
           const allowFallbackOnThisError = isMiniVerifyUnavailableError(miniError);
           if (
-            worldAppMiniRuntime ||
+            likelyWorldAppContextFromInstall ||
             !worldIdConfig.external.configured ||
             (!allowFallbackOnThisError && !shouldFallbackFromMiniToExternal(miniError))
           ) {
             throw miniError;
           }
         }
-      } else if (worldAppMiniRuntime) {
+      } else if (likelyWorldAppContextFromInstall) {
         throw new Error(`minikit_unavailable: ${miniInstallErrorCode ?? "unknown"}`);
       }
     }
@@ -784,21 +794,28 @@ export default function SubmitPage() {
     event.preventDefault();
     setSubmitting(true);
     setError(null);
+    const submitTimeoutId = window.setTimeout(() => {
+      setSubmitting(false);
+      setError((prev) => prev ?? "submit_timeout: verification or submission did not complete in time. Retry.");
+    }, SUBMIT_FLOW_TIMEOUT_MS);
 
     if (!thirdwebConfigured) {
       setError("Missing VITE_THIRDWEB_CLIENT_ID. Configure dapp/.env and restart the dev server.");
+      window.clearTimeout(submitTimeoutId);
       setSubmitting(false);
       return;
     }
 
     if (!walletConnected || !activeAccount) {
       setError("Connect wallet before creating a request.");
+      window.clearTimeout(submitTimeoutId);
       setSubmitting(false);
       return;
     }
 
     if (!worldIdConfigured) {
       setError("World ID is not configured. Set VITE_WORLD_ID_* values and redeploy frontend.");
+      window.clearTimeout(submitTimeoutId);
       setSubmitting(false);
       return;
     }
@@ -827,6 +844,7 @@ export default function SubmitPage() {
       }
       setError(message);
     } finally {
+      window.clearTimeout(submitTimeoutId);
       setSubmitting(false);
     }
   };

@@ -209,6 +209,13 @@ export class ApiRequestError extends Error {
 }
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "").trim().replace(/\/$/, "");
+const API_TIMEOUT_MS = (() => {
+  const raw = Number(import.meta.env.VITE_API_TIMEOUT_MS ?? "");
+  if (!Number.isFinite(raw) || raw <= 0) {
+    return 30_000;
+  }
+  return Math.floor(raw);
+})();
 
 const WALLET_AUTH_SIGNATURE_HEADER = "x-wallet-auth-signature";
 const WALLET_AUTH_TIMESTAMP_HEADER = "x-wallet-auth-timestamp";
@@ -278,13 +285,41 @@ async function requestJson<T>(path: string, options?: RequestInit): Promise<T> {
   if (hasBody && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
+  const timeoutController = new AbortController();
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const externalSignal = options?.signal;
+  const forwardAbort = () => timeoutController.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      timeoutController.abort();
+    } else {
+      externalSignal.addEventListener("abort", forwardAbort, { once: true });
+    }
+  }
+  timeoutId = setTimeout(() => {
+    timeoutController.abort();
+  }, API_TIMEOUT_MS);
   let response: Response;
   try {
     response = await fetch(requestUrl, {
       ...options,
-      headers
+      headers,
+      signal: timeoutController.signal
     });
   } catch (error) {
+    if (externalSignal) {
+      externalSignal.removeEventListener("abort", forwardAbort);
+    }
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new ApiRequestError(`network_timeout: request to '${requestUrl}' exceeded ${API_TIMEOUT_MS}ms`, {
+        status: 0,
+        errorCode: "network_timeout",
+        detail: `timeout_ms=${API_TIMEOUT_MS}`
+      });
+    }
     const detail = error instanceof Error ? error.message : String(error);
     throw new ApiRequestError(`network_error: request to '${requestUrl}' failed (${detail})`, {
       status: 0,
@@ -297,7 +332,20 @@ async function requestJson<T>(path: string, options?: RequestInit): Promise<T> {
   try {
     payload = (await response.json()) as ApiEnvelope<T>;
   } catch {
+    if (externalSignal) {
+      externalSignal.removeEventListener("abort", forwardAbort);
+    }
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
     throw new Error(`invalid_api_response: '${requestUrl}' returned non-JSON (HTTP ${response.status})`);
+  }
+
+  if (externalSignal) {
+    externalSignal.removeEventListener("abort", forwardAbort);
+  }
+  if (timeoutId) {
+    clearTimeout(timeoutId);
   }
 
   if (!response.ok || !payload.ok || !payload.data) {
