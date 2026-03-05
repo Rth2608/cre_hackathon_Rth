@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import AppNav from "../components/AppNav";
-import { getPorStatus, type PorProofSnapshot, type PorStatus } from "../lib/api";
+import { ApiRequestError, getPorStatus, type PorProofSnapshot, type PorStatus } from "../lib/api";
 
 function formatUsdcFromMicro(raw: string): string {
   const value = BigInt(raw);
@@ -21,15 +21,26 @@ export default function PorDashboardPage() {
   const [payload, setPayload] = useState<PorStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [emptyState, setEmptyState] = useState(false);
 
   const load = async () => {
     setLoading(true);
     setError(null);
+    setEmptyState(false);
     try {
       const next = await getPorStatus();
       setPayload(next);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (
+        err instanceof ApiRequestError &&
+        err.errorCode === "por_status_unavailable" &&
+        err.detail?.includes("por_data_unavailable")
+      ) {
+        setPayload(null);
+        setEmptyState(true);
+      } else {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
       setLoading(false);
     }
@@ -61,6 +72,17 @@ export default function PorDashboardPage() {
         ) : null}
 
         {error && <p className="error-text">{error}</p>}
+
+        {emptyState && !loading && !error && (
+          <section className="status-card">
+            <h2>No PoR Data Yet</h2>
+            <p>No proof-of-reserve records are available yet.</p>
+            <p>
+              PoR will appear after the first successful verification finalization (auto-record enabled), or after a
+              manual on-chain seed record.
+            </p>
+          </section>
+        )}
 
         {payload && (
           <>
