@@ -1,3 +1,6 @@
+import { signMessage } from "thirdweb/utils";
+import type { Account } from "thirdweb/wallets";
+
 export type NodeId = string;
 
 export interface MarketRequestInput {
@@ -35,10 +38,29 @@ export interface RequestRecord {
     chainId: number;
     explorerUrl?: string;
     simulated: boolean;
+    idempotencyKey?: string;
+    idempotencyReused?: boolean;
+    submissionAttempts?: number;
   };
   activeNodes?: RegisteredNode[];
   paymentReceipt?: VerificationPaymentReceipt;
+  workflowStepLogs?: WorkflowStepLog[];
   lastError?: string;
+}
+
+export interface WorkflowStepLog {
+  step:
+    | "validate_input"
+    | "dispatch_nodes"
+    | "collect_reports"
+    | "compute_consensus"
+    | "persist_offchain_report"
+    | "submit_onchain"
+    | "emit_run_summary";
+  status: "ok" | "failed" | "skipped";
+  startedAt: string;
+  endedAt: string;
+  detail?: string;
 }
 
 export interface VerificationPaymentReceipt {
@@ -118,7 +140,7 @@ export interface PorProofSnapshot {
 }
 
 export interface PorStatus {
-  mode: "MOCK" | "FILE" | "ONCHAIN";
+  mode: "FILE" | "ONCHAIN";
   source: string;
   latest: PorProofSnapshot;
   history: PorProofSnapshot[];
@@ -153,7 +175,7 @@ export interface WorldIdSession {
   clientSource?: "miniapp" | "external" | "manual";
   issuedAt: string;
   expiresAt: string;
-  source: "world_id_cloud" | "assume";
+  source: "world_id_cloud";
 }
 
 interface ApiEnvelope<T> {
@@ -163,7 +185,76 @@ interface ApiEnvelope<T> {
   detail?: string;
 }
 
+interface ApiRequestErrorOptions {
+  status: number;
+  errorCode?: string;
+  detail?: string;
+  traceId?: string;
+}
+
+export class ApiRequestError extends Error {
+  readonly status: number;
+  readonly errorCode?: string;
+  readonly detail?: string;
+  readonly traceId?: string;
+
+  constructor(message: string, options: ApiRequestErrorOptions) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = options.status;
+    this.errorCode = options.errorCode;
+    this.detail = options.detail;
+    this.traceId = options.traceId;
+  }
+}
+
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "").trim().replace(/\/$/, "");
+
+const WALLET_AUTH_SIGNATURE_HEADER = "x-wallet-auth-signature";
+const WALLET_AUTH_TIMESTAMP_HEADER = "x-wallet-auth-timestamp";
+
+function toLowerAddress(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function buildWalletAuthMessage(input: {
+  walletAddress: string;
+  method: string;
+  path: string;
+  timestamp: string;
+}): string {
+  return [
+    "CRE Wallet Auth v1",
+    `wallet: ${toLowerAddress(input.walletAddress)}`,
+    `method: ${input.method.toUpperCase()}`,
+    `path: ${input.path}`,
+    `timestamp: ${input.timestamp}`
+  ].join("\n");
+}
+
+async function buildWalletAuthHeaders(input: {
+  account: Account;
+  walletAddress: string;
+  method: string;
+  path: string;
+}): Promise<Record<string, string>> {
+  const timestamp = String(Date.now());
+  const message = buildWalletAuthMessage({
+    walletAddress: input.walletAddress,
+    method: input.method,
+    path: input.path,
+    timestamp
+  });
+  const signature = await signMessage({
+    account: input.account,
+    message
+  });
+  return {
+    "x-wallet-address": toLowerAddress(input.walletAddress),
+    [WALLET_AUTH_SIGNATURE_HEADER]: signature,
+    [WALLET_AUTH_TIMESTAMP_HEADER]: timestamp
+  };
+}
 
 function buildApiUrl(path: string): string {
   return API_BASE_URL ? `${API_BASE_URL}${path}` : path;
@@ -193,7 +284,11 @@ async function requestJson<T>(path: string, options?: RequestInit): Promise<T> {
     });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`network_error: request to '${requestUrl}' failed (${detail})`);
+    throw new ApiRequestError(`network_error: request to '${requestUrl}' failed (${detail})`, {
+      status: 0,
+      errorCode: "network_error",
+      detail
+    });
   }
 
   let payload: ApiEnvelope<T>;
@@ -204,12 +299,29 @@ async function requestJson<T>(path: string, options?: RequestInit): Promise<T> {
   }
 
   if (!response.ok || !payload.ok || !payload.data) {
-    const detail = typeof payload.detail === "string" ? payload.detail.trim() : "";
-    const message = payload.error ? (detail ? `${payload.error}: ${detail}` : payload.error) : `HTTP ${response.status}`;
-    throw new Error(message);
+    const payloadRecord = payload as unknown as Record<string, unknown>;
+    const errorCode = typeof payloadRecord.error === "string" ? payloadRecord.error.trim() : "";
+    const detail = typeof payloadRecord.detail === "string" ? payloadRecord.detail.trim() : "";
+    const traceId = typeof payloadRecord.traceId === "string" ? payloadRecord.traceId.trim() : undefined;
+    const message = errorCode ? (detail ? `${errorCode}: ${detail}` : errorCode) : `HTTP ${response.status}`;
+    throw new ApiRequestError(message, {
+      status: response.status,
+      errorCode: errorCode || undefined,
+      detail: detail || undefined,
+      traceId
+    });
   }
 
   return payload.data;
+}
+
+export interface RunVerificationResult extends RequestRecord {
+  traceId?: string;
+  workflow?: {
+    traceId?: string;
+    stepLogs?: WorkflowStepLog[];
+    [key: string]: unknown;
+  };
 }
 
 export async function createRequest(input: MarketRequestInput): Promise<RequestRecord> {
@@ -222,14 +334,24 @@ export async function createRequest(input: MarketRequestInput): Promise<RequestR
 export async function createRequestForWallet(
   input: MarketRequestInput,
   walletAddress: string,
-  worldIdToken?: string
+  worldIdToken?: string,
+  account?: Account
 ): Promise<RequestRecord> {
+  if (!account) {
+    throw new Error("wallet_account_required");
+  }
+  const authHeaders = await buildWalletAuthHeaders({
+    account,
+    walletAddress,
+    method: "POST",
+    path: "/api/requests"
+  });
   return requestJson<RequestRecord>("/api/requests", {
     method: "POST",
     headers: appendWorldIdTokenHeader(
       {
-        "x-wallet-address": walletAddress,
-        "payment-signature": `mock-${walletAddress}-${Date.now()}`
+        ...authHeaders,
+        "payment-signature": authHeaders[WALLET_AUTH_SIGNATURE_HEADER] ?? ""
       },
       worldIdToken
     ),
@@ -265,25 +387,31 @@ export async function runVerification(requestId: string): Promise<RequestRecord>
   return data;
 }
 
-export async function runVerificationForWallet(requestId: string, walletAddress: string): Promise<RequestRecord> {
-  const data = await requestJson<{
-    requestId: string;
-    status: RequestRecord["status"];
-    runAttempts: number;
-    createdAt: string;
-    updatedAt: string;
-    input: MarketRequestInput;
-    consensus?: RequestRecord["consensus"];
-    onchainReceipt?: RequestRecord["onchainReceipt"];
-    activeNodes?: RequestRecord["activeNodes"];
-    paymentReceipt?: RequestRecord["paymentReceipt"];
-    lastError?: string;
-  }>(`/api/requests/${encodeURIComponent(requestId)}/run-verification`, {
+export async function runVerificationForWallet(
+  requestId: string,
+  walletAddress: string,
+  worldIdToken?: string,
+  account?: Account
+): Promise<RunVerificationResult> {
+  if (!account) {
+    throw new Error("wallet_account_required");
+  }
+  const path = `/api/requests/${encodeURIComponent(requestId)}/run-verification`;
+  const authHeaders = await buildWalletAuthHeaders({
+    account,
+    walletAddress,
     method: "POST",
-    headers: {
-      "x-wallet-address": walletAddress,
-      "payment-signature": `mock-${walletAddress}-${Date.now()}`
-    }
+    path
+  });
+  const data = await requestJson<RunVerificationResult>(path, {
+    method: "POST",
+    headers: appendWorldIdTokenHeader(
+      {
+        ...authHeaders,
+        "payment-signature": authHeaders[WALLET_AUTH_SIGNATURE_HEADER] ?? ""
+      },
+      worldIdToken
+    )
   });
 
   return data;
@@ -324,13 +452,23 @@ export async function registerNode(input: {
   stakeAmount?: string;
   participationEnabled?: boolean;
   worldIdToken?: string;
+  account?: Account;
 }): Promise<{ node: RegisteredNode; paymentReceipt: VerificationPaymentReceipt }> {
+  if (!input.account) {
+    throw new Error("wallet_account_required");
+  }
+  const authHeaders = await buildWalletAuthHeaders({
+    account: input.account,
+    walletAddress: input.walletAddress,
+    method: "POST",
+    path: "/api/nodes/register"
+  });
   return requestJson<{ node: RegisteredNode; paymentReceipt: VerificationPaymentReceipt }>("/api/nodes/register", {
     method: "POST",
     headers: appendWorldIdTokenHeader(
       {
-        "x-wallet-address": input.walletAddress,
-        "payment-signature": `mock-${input.walletAddress}-${Date.now()}`
+        ...authHeaders,
+        "payment-signature": authHeaders[WALLET_AUTH_SIGNATURE_HEADER] ?? ""
       },
       input.worldIdToken
     ),
@@ -348,15 +486,25 @@ export async function requestNodeChallenge(input: {
   stakeAmount?: string;
   participationEnabled?: boolean;
   worldIdToken?: string;
+  account?: Account;
 }): Promise<{ challenge: NodeRegistrationChallenge; paymentReceipt: VerificationPaymentReceipt }> {
+  if (!input.account) {
+    throw new Error("wallet_account_required");
+  }
+  const authHeaders = await buildWalletAuthHeaders({
+    account: input.account,
+    walletAddress: input.walletAddress,
+    method: "POST",
+    path: "/api/nodes/challenge"
+  });
   return requestJson<{ challenge: NodeRegistrationChallenge; paymentReceipt: VerificationPaymentReceipt }>(
     "/api/nodes/challenge",
     {
       method: "POST",
       headers: appendWorldIdTokenHeader(
         {
-          "x-wallet-address": input.walletAddress,
-          "payment-signature": `mock-${input.walletAddress}-${Date.now()}`
+          ...authHeaders,
+          "payment-signature": authHeaders[WALLET_AUTH_SIGNATURE_HEADER] ?? ""
         },
         input.worldIdToken
       ),
@@ -371,12 +519,20 @@ export async function verifyWorldIdForWallet(input: {
   appId?: string;
   action?: string;
   clientSource?: "miniapp" | "external" | "manual";
+  account?: Account;
 }): Promise<{ session: WorldIdSession }> {
+  if (!input.account) {
+    throw new Error("wallet_account_required");
+  }
+  const authHeaders = await buildWalletAuthHeaders({
+    account: input.account,
+    walletAddress: input.walletAddress,
+    method: "POST",
+    path: "/api/world-id/verify"
+  });
   return requestJson<{ session: WorldIdSession }>("/api/world-id/verify", {
     method: "POST",
-    headers: {
-      "x-wallet-address": input.walletAddress
-    },
+    headers: authHeaders,
     body: JSON.stringify({
       walletAddress: input.walletAddress,
       proof: input.proof,
@@ -391,12 +547,22 @@ export async function activateNodeChallenge(input: {
   challengeId: string;
   walletAddress: string;
   signature: string;
+  account?: Account;
 }): Promise<{
   node: RegisteredNode;
   challenge: NodeRegistrationChallenge;
   endpointProbe: NodeEndpointProbe;
   lifecycleOnchainReceipt?: RequestRecord["onchainReceipt"];
 }> {
+  if (!input.account) {
+    throw new Error("wallet_account_required");
+  }
+  const authHeaders = await buildWalletAuthHeaders({
+    account: input.account,
+    walletAddress: input.walletAddress,
+    method: "POST",
+    path: "/api/nodes/activate"
+  });
   return requestJson<{
     node: RegisteredNode;
     challenge: NodeRegistrationChallenge;
@@ -404,9 +570,7 @@ export async function activateNodeChallenge(input: {
     lifecycleOnchainReceipt?: RequestRecord["onchainReceipt"];
   }>("/api/nodes/activate", {
     method: "POST",
-    headers: {
-      "x-wallet-address": input.walletAddress
-    },
+    headers: authHeaders,
     body: JSON.stringify(input)
   });
 }
@@ -416,12 +580,22 @@ export async function sendNodeHeartbeat(input: {
   endpointUrl: string;
   timestamp: number;
   signature: string;
+  account?: Account;
 }): Promise<{
   node: RegisteredNode;
   endpointProbe?: NodeEndpointProbe;
   heartbeatMessage: string;
   lifecycleOnchainReceipt?: RequestRecord["onchainReceipt"];
 }> {
+  if (!input.account) {
+    throw new Error("wallet_account_required");
+  }
+  const authHeaders = await buildWalletAuthHeaders({
+    account: input.account,
+    walletAddress: input.walletAddress,
+    method: "POST",
+    path: "/api/nodes/heartbeat"
+  });
   return requestJson<{
     node: RegisteredNode;
     endpointProbe?: NodeEndpointProbe;
@@ -431,9 +605,7 @@ export async function sendNodeHeartbeat(input: {
     "/api/nodes/heartbeat",
     {
       method: "POST",
-      headers: {
-        "x-wallet-address": input.walletAddress
-      },
+      headers: authHeaders,
       body: JSON.stringify(input)
     }
   );

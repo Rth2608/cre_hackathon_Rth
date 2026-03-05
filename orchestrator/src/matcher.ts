@@ -1,12 +1,11 @@
 import type { CanonicalModelFamily, RegisteredNode } from "./types";
-import { DEFAULT_RUNTIME_NODES, type RuntimeNode } from "./mockNodes";
+import type { RuntimeNode } from "./types";
 
 const FAMILY_ORDER: CanonicalModelFamily[] = ["gpt", "gemini", "claude", "grok"];
 
 interface MatchOptions {
   desiredNodes?: number;
   minStakeAmount?: string;
-  allowDefaultNodes?: boolean;
   requireEndpointUrl?: boolean;
   requireHealthyEndpoint?: boolean;
   heartbeatTtlSeconds?: number;
@@ -61,7 +60,6 @@ function isHeartbeatRecent(node: RegisteredNode, heartbeatTtlSeconds: number | u
 export function selectRuntimeNodesForRequest(registeredNodes: RegisteredNode[], options?: MatchOptions): MatchResult {
   const desiredNodes = options?.desiredNodes ?? 4;
   const minStake = parseStake(options?.minStakeAmount ?? "0");
-  const allowDefaultNodes = options?.allowDefaultNodes ?? true;
   const requireEndpointUrl = options?.requireEndpointUrl ?? false;
   const requireHealthyEndpoint = options?.requireHealthyEndpoint ?? false;
   const heartbeatTtlSeconds = options?.heartbeatTtlSeconds;
@@ -104,14 +102,6 @@ export function selectRuntimeNodesForRequest(registeredNodes: RegisteredNode[], 
     selectedRuntimeNodes.push(toRuntime(node, family));
     selectedNodeIds.add(node.registrationId);
     usedFamilies.add(family);
-  }
-
-  if (selectedRuntimeNodes.length === 0 && allowDefaultNodes) {
-    return {
-      runtimeNodes: DEFAULT_RUNTIME_NODES,
-      selectedNodes: [],
-      usedDefaultNodes: true
-    };
   }
 
   return {

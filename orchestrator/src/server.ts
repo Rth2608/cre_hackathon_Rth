@@ -20,14 +20,48 @@ import { ValidationError, validateMarketRequest } from "./validator";
 import {
   consumeWorldIdSessionToken,
   issueWorldIdSessionFromProof,
-  isWorldIdAssumeEnabled,
   validateWorldIdSessionToken
 } from "./worldId";
 import { enforceX402Payment } from "./x402";
 
 const PORT = Number.parseInt(process.env.PORT ?? "8787", 10);
 const MAX_RUN_ATTEMPTS = 2;
-const CORS_ALLOW_HEADERS = "Content-Type, X-Wallet-Address, X-Payment, Payment-Signature, X-World-ID-Token";
+const CORS_ALLOW_HEADERS =
+  "Content-Type, X-Wallet-Address, X-Payment, Payment-Signature, X-World-ID-Token, X-Wallet-Auth-Signature, X-Wallet-Auth-Timestamp";
+const WALLET_AUTH_SIGNATURE_HEADER = "x-wallet-auth-signature";
+const WALLET_AUTH_TIMESTAMP_HEADER = "x-wallet-auth-timestamp";
+const DEFAULT_WALLET_AUTH_MAX_AGE_MS = 5 * 60_000;
+const STARTUP_SKIP_ENV_VALIDATION = parseBooleanEnv(process.env.SKIP_STARTUP_ENV_VALIDATION, false);
+
+type ServerLogLevel = "info" | "warn" | "error";
+
+function stringifyError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+function logServerEvent(level: ServerLogLevel, event: string, payload: Record<string, unknown>): void {
+  const line = `${nowIso()} ${event} ${JSON.stringify(payload)}`;
+  if (level === "error") {
+    console.error(line);
+    return;
+  }
+  if (level === "warn") {
+    console.warn(line);
+    return;
+  }
+  console.log(line);
+}
+
+function logServerFailure(event: string, payload: Record<string, unknown>): void {
+  logServerEvent("error", event, payload);
+}
+
+function buildRequestRunTraceId(requestId: string, runAttempt: number): string {
+  return `${requestId}:run:${runAttempt}`;
+}
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body, null, 2), {
@@ -77,6 +111,7 @@ function buildRequestResponse(record: StoredRequest): Record<string, unknown> {
     onchainReceipt: record.onchainReceipt,
     activeNodes: record.activeNodes,
     paymentReceipt: record.paymentReceipt,
+    workflowStepLogs: record.workflowStepLogs,
     lastError: record.lastError
   };
 }
@@ -122,6 +157,135 @@ function parseBooleanEnv(value: string | undefined, fallback: boolean): boolean 
   return fallback;
 }
 
+function resolveWalletAuthEnabled(): boolean {
+  return parseBooleanEnv(process.env.REQUIRE_WALLET_AUTH_SIGNATURE, true);
+}
+
+function resolveWalletAuthMaxAgeMs(): number {
+  const raw = process.env.WALLET_AUTH_MAX_AGE_MS?.trim();
+  if (!raw) return DEFAULT_WALLET_AUTH_MAX_AGE_MS;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isInteger(parsed) || parsed < 10_000 || parsed > 30 * 60_000) {
+    return DEFAULT_WALLET_AUTH_MAX_AGE_MS;
+  }
+  return parsed;
+}
+
+function buildWalletAuthMessage(input: {
+  walletAddress: string;
+  method: string;
+  path: string;
+  timestamp: string;
+}): string {
+  return [
+    "CRE Wallet Auth v1",
+    `wallet: ${input.walletAddress}`,
+    `method: ${input.method.toUpperCase()}`,
+    `path: ${input.path}`,
+    `timestamp: ${input.timestamp}`
+  ].join("\n");
+}
+
+async function requireWalletRequestAuth(
+  req: Request,
+  expectedWalletAddress: string
+): Promise<{ ok: true } | { ok: false; status: number; error: string; detail?: string }> {
+  const headerWalletRaw = req.headers.get("x-wallet-address")?.trim() ?? "";
+  if (!headerWalletRaw) {
+    return {
+      ok: false,
+      status: 401,
+      error: "wallet_header_missing",
+      detail: "x-wallet-address header is required."
+    };
+  }
+
+  let normalizedHeaderWallet: string;
+  let normalizedExpectedWallet: string;
+  try {
+    normalizedHeaderWallet = normalizeAddress(headerWalletRaw);
+    normalizedExpectedWallet = normalizeAddress(expectedWalletAddress);
+  } catch (error) {
+    return {
+      ok: false,
+      status: 400,
+      error: "invalid_wallet_address",
+      detail: error instanceof Error ? error.message : String(error)
+    };
+  }
+
+  if (normalizedHeaderWallet !== normalizedExpectedWallet) {
+    return {
+      ok: false,
+      status: 400,
+      error: "wallet_header_mismatch",
+      detail: "x-wallet-address must match walletAddress in request."
+    };
+  }
+
+  if (!resolveWalletAuthEnabled()) {
+    return { ok: true };
+  }
+
+  const signature = req.headers.get(WALLET_AUTH_SIGNATURE_HEADER)?.trim() ?? "";
+  const timestampRaw = req.headers.get(WALLET_AUTH_TIMESTAMP_HEADER)?.trim() ?? "";
+  if (!signature || !timestampRaw) {
+    return {
+      ok: false,
+      status: 401,
+      error: "wallet_auth_signature_required",
+      detail: `set ${WALLET_AUTH_SIGNATURE_HEADER} and ${WALLET_AUTH_TIMESTAMP_HEADER} headers`
+    };
+  }
+
+  const timestamp = Number.parseInt(timestampRaw, 10);
+  if (!Number.isInteger(timestamp)) {
+    return {
+      ok: false,
+      status: 400,
+      error: "wallet_auth_timestamp_invalid"
+    };
+  }
+
+  if (Math.abs(Date.now() - timestamp) > resolveWalletAuthMaxAgeMs()) {
+    return {
+      ok: false,
+      status: 401,
+      error: "wallet_auth_expired",
+      detail: "wallet auth signature is outside the allowed time window."
+    };
+  }
+
+  const path = new URL(req.url).pathname;
+  const message = buildWalletAuthMessage({
+    walletAddress: normalizedExpectedWallet,
+    method: req.method,
+    path,
+    timestamp: String(timestamp)
+  });
+
+  let recovered: string;
+  try {
+    recovered = normalizeAddress(verifyMessage(message, signature));
+  } catch {
+    return {
+      ok: false,
+      status: 401,
+      error: "wallet_auth_signature_invalid"
+    };
+  }
+
+  if (recovered !== normalizedExpectedWallet) {
+    return {
+      ok: false,
+      status: 401,
+      error: "wallet_auth_signature_mismatch"
+    };
+  }
+
+  return { ok: true };
+}
+
 function resolveHeartbeatTtlSeconds(): number | undefined {
   const raw = process.env.NODE_HEARTBEAT_TTL_SECONDS?.trim();
   if (!raw) return undefined;
@@ -137,15 +301,173 @@ function resolveDistributedDonMode(): boolean {
   return parseBooleanEnv(process.env.DON_DISTRIBUTED_MODE, fallback);
 }
 
+function resolveRealRuntimeOnlyEnabled(): boolean {
+  return parseBooleanEnv(process.env.REAL_RUNTIME_ONLY, true);
+}
+
+function resolveRequireRegisteredNodesForRuntime(distributedDonMode: boolean): boolean {
+  return parseBooleanEnv(process.env.REQUIRE_REGISTERED_NODES, distributedDonMode);
+}
+
+function resolveNodeEndpointVerifyEnabledForRuntime(): boolean {
+  return parseBooleanEnv(process.env.NODE_ENDPOINT_VERIFY_ENABLED, false);
+}
+
+function assertRealRuntimeGuard(input: {
+  distributedDonMode: boolean;
+  requireRegisteredNodes: boolean;
+  requireEndpointUrl: boolean;
+  requireHealthyEndpoint: boolean;
+}): { ok: true } | { ok: false; reason: string } {
+  if (!resolveRealRuntimeOnlyEnabled()) {
+    return { ok: true };
+  }
+
+  if (!resolveNodeEndpointVerifyEnabledForRuntime()) {
+    return { ok: false, reason: "NODE_ENDPOINT_VERIFY_ENABLED must be true when REAL_RUNTIME_ONLY=true." };
+  }
+  if (!input.distributedDonMode) {
+    return { ok: false, reason: "DON_DISTRIBUTED_MODE must be true when REAL_RUNTIME_ONLY=true." };
+  }
+  if (!input.requireRegisteredNodes) {
+    return { ok: false, reason: "REQUIRE_REGISTERED_NODES must be true when REAL_RUNTIME_ONLY=true." };
+  }
+  if (!input.requireEndpointUrl) {
+    return { ok: false, reason: "REQUIRE_NODE_ENDPOINT_URL must be true when REAL_RUNTIME_ONLY=true." };
+  }
+  if (!input.requireHealthyEndpoint) {
+    return { ok: false, reason: "REQUIRE_HEALTHY_NODE_ENDPOINTS must be true when REAL_RUNTIME_ONLY=true." };
+  }
+
+  return { ok: true };
+}
+
+function collectRequiredEnv(issues: string[], key: string): string {
+  const value = process.env[key]?.trim() ?? "";
+  if (!value) {
+    issues.push(`${key} is required`);
+  }
+  return value;
+}
+
+function validatePositiveIntegerEnv(issues: string[], key: string): void {
+  const value = process.env[key]?.trim() ?? "";
+  if (!value) {
+    issues.push(`${key} is required`);
+    return;
+  }
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    issues.push(`${key} must be a positive integer`);
+  }
+}
+
+function validateAddressEnv(issues: string[], key: string): void {
+  const value = collectRequiredEnv(issues, key);
+  if (!value) {
+    return;
+  }
+  try {
+    getAddress(value);
+  } catch {
+    issues.push(`${key} must be a valid EVM address`);
+  }
+}
+
+function validateOptionalAddressEnv(issues: string[], key: string, value: string): void {
+  if (!value) {
+    return;
+  }
+  try {
+    getAddress(value);
+  } catch {
+    issues.push(`${key} must be a valid EVM address`);
+  }
+}
+
+function assertStartupConfigOrThrow(): void {
+  if (STARTUP_SKIP_ENV_VALIDATION) {
+    logServerEvent("warn", "startup.config.validation_skipped", {
+      reason: "SKIP_STARTUP_ENV_VALIDATION=true"
+    });
+    return;
+  }
+
+  const issues: string[] = [];
+
+  if (!Number.isInteger(PORT) || PORT <= 0 || PORT > 65535) {
+    issues.push("PORT must be an integer between 1 and 65535");
+  }
+
+  const worldIdProfilesRaw = process.env.WORLD_ID_ALLOWED_PROFILES_JSON?.trim() ?? "";
+  if (!worldIdProfilesRaw) {
+    collectRequiredEnv(issues, "WORLD_ID_APP_ID");
+    collectRequiredEnv(issues, "WORLD_ID_ACTION");
+  } else {
+    try {
+      const parsed = JSON.parse(worldIdProfilesRaw);
+      if (!Array.isArray(parsed) || parsed.length === 0) {
+        issues.push("WORLD_ID_ALLOWED_PROFILES_JSON must be a non-empty JSON array");
+      }
+    } catch {
+      issues.push("WORLD_ID_ALLOWED_PROFILES_JSON must be valid JSON");
+    }
+  }
+  collectRequiredEnv(issues, "WORLD_ID_RP_ID");
+  collectRequiredEnv(issues, "RPC_URL");
+  validatePositiveIntegerEnv(issues, "CHAIN_ID");
+  validateAddressEnv(issues, "CONTRACT_ADDRESS");
+
+  const coordinatorPrivateKey = collectRequiredEnv(issues, "COORDINATOR_PRIVATE_KEY");
+  if (coordinatorPrivateKey && !/^0x[0-9a-fA-F]{64}$/.test(coordinatorPrivateKey)) {
+    issues.push("COORDINATOR_PRIVATE_KEY must be a 32-byte hex private key (0x...)");
+  }
+
+  const distributedDonMode = resolveDistributedDonMode();
+  const requireRegisteredNodes = resolveRequireRegisteredNodesForRuntime(distributedDonMode);
+  const requireEndpointUrl = parseBooleanEnv(process.env.REQUIRE_NODE_ENDPOINT_URL, distributedDonMode);
+  const requireHealthyEndpoint = parseBooleanEnv(process.env.REQUIRE_HEALTHY_NODE_ENDPOINTS, distributedDonMode);
+  const runtimeGuard = assertRealRuntimeGuard({
+    distributedDonMode,
+    requireRegisteredNodes,
+    requireEndpointUrl,
+    requireHealthyEndpoint
+  });
+  if (!runtimeGuard.ok) {
+    issues.push(runtimeGuard.reason);
+  }
+
+  const signedReportsEnabled = parseBooleanEnv(process.env.USE_DON_SIGNED_REPORTS, false);
+  if (signedReportsEnabled || distributedDonMode) {
+    const verifierAddress = process.env.DON_VERIFIER_CONTRACT?.trim() || process.env.CONTRACT_ADDRESS?.trim() || "";
+    if (!verifierAddress) {
+      issues.push("DON_VERIFIER_CONTRACT (or CONTRACT_ADDRESS) is required when DON signing is enabled");
+    } else {
+      validateOptionalAddressEnv(issues, "DON_VERIFIER_CONTRACT", verifierAddress);
+    }
+    collectRequiredEnv(issues, "DON_DOMAIN_NAME");
+    collectRequiredEnv(issues, "DON_DOMAIN_VERSION");
+  }
+
+  if (issues.length > 0) {
+    throw new Error(`startup_config_invalid: ${issues.join(" | ")}`);
+  }
+
+  logServerEvent("info", "startup.config.validated", {
+    realRuntimeOnly: resolveRealRuntimeOnlyEnabled(),
+    distributedDonMode,
+    signedReportsEnabled,
+    requireRegisteredNodes,
+    requireEndpointUrl,
+    requireHealthyEndpoint
+  });
+}
+
 async function requireWorldIdForWallet(
   req: Request,
   walletAddress: string,
   options?: { consumeToken?: boolean }
 ): Promise<{ ok: true } | { ok: false; status: number; error: string; detail?: string }> {
-  if (isWorldIdAssumeEnabled()) {
-    return { ok: true };
-  }
-
   const token = req.headers.get("x-world-id-token")?.trim() ?? "";
   if (!token) {
     return {
@@ -368,6 +690,14 @@ async function executeVerificationForRecord(
   }
 
   const requestId = existing.requestId;
+  const runAttempt = existing.runAttempts + 1;
+  const traceId = buildRequestRunTraceId(requestId, runAttempt);
+  logServerEvent("info", "request.run.start", {
+    traceId,
+    requestId,
+    runAttempt,
+    submitterAddress: existing.input.submitterAddress
+  });
 
   const paymentResult =
     options?.paymentReceipt !== undefined
@@ -382,17 +712,43 @@ async function executeVerificationForRecord(
         });
 
   if (!paymentResult.ok || !paymentResult.receipt) {
+    logServerFailure("request.run.payment_failed", {
+      traceId,
+      requestId,
+      runAttempt
+    });
     return paymentResult.response ?? jsonResponse({ ok: false, error: "payment_failed" }, 402);
   }
 
   const distributedDonMode = resolveDistributedDonMode();
   const minNodeStake = process.env.MIN_NODE_STAKE?.trim() || "0";
-  const requireRegisteredNodes = parseBooleanEnv(process.env.REQUIRE_REGISTERED_NODES, distributedDonMode);
-  const allowDefaultNodes = parseBooleanEnv(process.env.ALLOW_DEFAULT_NODES, !distributedDonMode);
+  const requireRegisteredNodes = resolveRequireRegisteredNodesForRuntime(distributedDonMode);
   const refreshHealthBeforeMatch = parseBooleanEnv(process.env.NODE_REFRESH_HEALTH_BEFORE_MATCH, false);
   const requireEndpointUrl = parseBooleanEnv(process.env.REQUIRE_NODE_ENDPOINT_URL, distributedDonMode);
   const requireHealthyEndpoint = parseBooleanEnv(process.env.REQUIRE_HEALTHY_NODE_ENDPOINTS, distributedDonMode);
   const heartbeatTtlSeconds = resolveHeartbeatTtlSeconds();
+  const realRuntimeGuard = assertRealRuntimeGuard({
+    distributedDonMode,
+    requireRegisteredNodes,
+    requireEndpointUrl,
+    requireHealthyEndpoint
+  });
+  if (!realRuntimeGuard.ok) {
+    logServerFailure("request.run.runtime_config_invalid", {
+      traceId,
+      requestId,
+      runAttempt,
+      detail: realRuntimeGuard.reason
+    });
+    return jsonResponse(
+      {
+        ok: false,
+        error: "runtime_config_invalid",
+        detail: realRuntimeGuard.reason
+      },
+      500
+    );
+  }
 
   const nodesSource = refreshHealthBeforeMatch
     ? await refreshNodeEndpointHealth()
@@ -401,7 +757,6 @@ async function executeVerificationForRecord(
   const match = selectRuntimeNodesForRequest(activeNodes, {
     desiredNodes: 4,
     minStakeAmount: minNodeStake,
-    allowDefaultNodes,
     requireEndpointUrl,
     requireHealthyEndpoint,
     heartbeatTtlSeconds
@@ -410,21 +765,30 @@ async function executeVerificationForRecord(
   if (requireRegisteredNodes && match.selectedNodes.length < 3) {
     const failedRecord: StoredRequest = {
       ...existing,
-      runAttempts: existing.runAttempts + 1,
+      runAttempts: runAttempt,
       status: "FAILED_NO_QUORUM",
       activeNodes: match.selectedNodes,
       paymentReceipt: paymentResult.receipt,
+      workflowStepLogs: undefined,
       updatedAt: nowIso(),
       lastError: "insufficient_registered_nodes"
     };
 
     await saveRequest(failedRecord);
+    logServerFailure("request.run.failed", {
+      traceId,
+      requestId,
+      status: failedRecord.status,
+      reason: failedRecord.lastError,
+      selectedNodes: match.selectedNodes.length
+    });
 
     return jsonResponse(
       {
         ok: false,
         error: "insufficient_registered_nodes",
         detail: "at least 3 ACTIVE/eligible registered nodes are required",
+        traceId,
         data: buildRequestResponse(failedRecord)
       },
       409
@@ -434,20 +798,30 @@ async function executeVerificationForRecord(
   if (match.runtimeNodes.length < 3) {
     const failedRecord: StoredRequest = {
       ...existing,
-      runAttempts: existing.runAttempts + 1,
+      runAttempts: runAttempt,
       status: "FAILED_NO_QUORUM",
       activeNodes: match.selectedNodes,
       paymentReceipt: paymentResult.receipt,
+      workflowStepLogs: undefined,
       updatedAt: nowIso(),
       lastError: "insufficient_runtime_nodes"
     };
     await saveRequest(failedRecord);
+    logServerFailure("request.run.failed", {
+      traceId,
+      requestId,
+      status: failedRecord.status,
+      reason: failedRecord.lastError,
+      selectedNodes: match.selectedNodes.length,
+      runtimeNodes: match.runtimeNodes.length
+    });
 
     return jsonResponse(
       {
         ok: false,
         error: "insufficient_runtime_nodes",
-        detail: "matched runtime nodes are fewer than quorum (3)"
+        detail: "matched runtime nodes are fewer than quorum (3)",
+        traceId
       },
       409
     );
@@ -455,15 +829,24 @@ async function executeVerificationForRecord(
 
   const runningRecord: StoredRequest = {
     ...existing,
-    runAttempts: existing.runAttempts + 1,
+    runAttempts: runAttempt,
     status: "RUNNING",
     activeNodes: match.selectedNodes,
     paymentReceipt: paymentResult.receipt,
+    workflowStepLogs: undefined,
     updatedAt: nowIso(),
     lastError: undefined
   };
 
   await saveRequest(runningRecord);
+  logServerEvent("info", "request.run.matched_nodes", {
+    traceId,
+    requestId,
+    runAttempt,
+    selectedNodes: match.selectedNodes.length,
+    runtimeNodes: match.runtimeNodes.length,
+    usedDefaultNodes: match.usedDefaultNodes
+  });
 
   try {
     const workflow = await runCreWorkflow({
@@ -507,17 +890,28 @@ async function executeVerificationForRecord(
       onchainReceipt: workflow.onchainReceipt,
       activeNodes: match.selectedNodes,
       paymentReceipt: paymentResult.receipt,
+      workflowStepLogs: workflow.stepLogs,
       updatedAt: nowIso(),
       lastError: finalStatus === "FAILED_ONCHAIN_SUBMISSION" ? "onchain submission failed" : undefined
     };
 
     await saveRequest(finalized);
+    if (finalStatus !== "FINALIZED") {
+      logServerFailure("request.run.failed", {
+        traceId,
+        requestId,
+        status: finalStatus,
+        reason: finalized.lastError ?? "workflow_non_finalized"
+      });
+    }
 
     return jsonResponse({
       ok: true,
       data: {
         ...buildRequestResponse(finalized),
+        traceId,
         workflow: {
+          traceId,
           artifactDir: workflow.artifactDir,
           reportPath: workflow.reportPath,
           stepLogs: workflow.stepLogs,
@@ -530,13 +924,19 @@ async function executeVerificationForRecord(
       }
     });
   } catch (error) {
+    const errorMessage = stringifyError(error);
+    logServerFailure("request.run.exception", {
+      traceId,
+      requestId,
+      error: errorMessage
+    });
     const failed: StoredRequest = {
       ...runningRecord,
       status: "FAILED_ONCHAIN_SUBMISSION",
       activeNodes: match.selectedNodes,
       paymentReceipt: paymentResult.receipt,
       updatedAt: nowIso(),
-      lastError: error instanceof Error ? error.message : String(error)
+      lastError: errorMessage
     };
     await saveRequest(failed);
 
@@ -544,7 +944,8 @@ async function executeVerificationForRecord(
       {
         ok: false,
         error: "verification_failed",
-        detail: failed.lastError
+        detail: failed.lastError,
+        traceId
       },
       500
     );
@@ -555,6 +956,18 @@ async function handleCreateRequest(req: Request): Promise<Response> {
   try {
     const body = await parseJsonBody<MarketRequestInput>(req);
     const validated = await validateMarketRequest(body);
+
+    const walletAuth = await requireWalletRequestAuth(req, validated.submitterAddress);
+    if (!walletAuth.ok) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: walletAuth.error,
+          detail: walletAuth.detail
+        },
+        walletAuth.status
+      );
+    }
 
     const worldIdAuth = await requireWorldIdForWallet(req, validated.submitterAddress);
     if (!worldIdAuth.ok) {
@@ -634,6 +1047,40 @@ async function handleRunVerification(req: Request, requestId: string): Promise<R
   if (!existing) {
     return jsonResponse({ ok: false, error: "request_not_found" }, 404);
   }
+  const traceId = buildRequestRunTraceId(requestId, existing.runAttempts + 1);
+
+  const walletAuth = await requireWalletRequestAuth(req, existing.input.submitterAddress);
+  if (!walletAuth.ok) {
+    return jsonResponse(
+      {
+        ok: false,
+        error: walletAuth.error,
+        detail: walletAuth.detail
+      },
+      walletAuth.status
+    );
+  }
+
+  const worldIdConsumeAuth = await requireWorldIdForWallet(req, existing.input.submitterAddress, { consumeToken: true });
+  if (!worldIdConsumeAuth.ok) {
+    logServerFailure("request.run_verification.world_id_denied", {
+      traceId,
+      requestId,
+      walletAddress: existing.input.submitterAddress,
+      error: worldIdConsumeAuth.error,
+      detail: worldIdConsumeAuth.detail ?? null
+    });
+    return jsonResponse(
+      {
+        ok: false,
+        error: worldIdConsumeAuth.error,
+        detail: worldIdConsumeAuth.detail,
+        traceId
+      },
+      worldIdConsumeAuth.status
+    );
+  }
+
   return executeVerificationForRecord(req, existing);
 }
 
@@ -683,18 +1130,16 @@ async function handleVerifyWorldId(req: Request): Promise<Response> {
 
   try {
     const normalizedWalletAddress = normalizeAddress(body.walletAddress);
-    const headerWalletAddress = req.headers.get("x-wallet-address")?.trim();
-    if (headerWalletAddress) {
-      const normalizedHeaderWalletAddress = normalizeAddress(headerWalletAddress);
-      if (normalizedHeaderWalletAddress !== normalizedWalletAddress) {
-        return jsonResponse(
-          {
-            ok: false,
-            error: "wallet_header_mismatch"
-          },
-          400
-        );
-      }
+    const walletAuth = await requireWalletRequestAuth(req, normalizedWalletAddress);
+    if (!walletAuth.ok) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: walletAuth.error,
+          detail: walletAuth.detail
+        },
+        walletAuth.status
+      );
     }
 
     const session = await issueWorldIdSessionFromProof({
@@ -764,8 +1209,30 @@ async function handleRegisterNode(req: Request): Promise<Response> {
     );
   }
 
+  const walletAuth = await requireWalletRequestAuth(req, normalizedWalletAddress);
+  if (!walletAuth.ok) {
+    logServerFailure("node.register.auth_failed", {
+      walletAddress: normalizedWalletAddress,
+      error: walletAuth.error,
+      detail: walletAuth.detail ?? null
+    });
+    return jsonResponse(
+      {
+        ok: false,
+        error: walletAuth.error,
+        detail: walletAuth.detail
+      },
+      walletAuth.status
+    );
+  }
+
   const worldIdAuth = await requireWorldIdForWallet(req, normalizedWalletAddress);
   if (!worldIdAuth.ok) {
+    logServerFailure("node.register.world_id_failed", {
+      walletAddress: normalizedWalletAddress,
+      error: worldIdAuth.error,
+      detail: worldIdAuth.detail ?? null
+    });
     return jsonResponse(
       {
         ok: false,
@@ -782,6 +1249,9 @@ async function handleRegisterNode(req: Request): Promise<Response> {
     walletAddress: normalizedWalletAddress
   });
   if (!paymentResult.ok) {
+    logServerFailure("node.register.payment_failed", {
+      walletAddress: normalizedWalletAddress
+    });
     return paymentResult.response ?? jsonResponse({ ok: false, error: "payment_failed" }, 402);
   }
 
@@ -813,11 +1283,15 @@ async function handleRegisterNode(req: Request): Promise<Response> {
       201
     );
   } catch (error) {
+    logServerFailure("node.register.failed", {
+      walletAddress: normalizedWalletAddress,
+      error: stringifyError(error)
+    });
     return jsonResponse(
       {
         ok: false,
         error: "node_registration_failed",
-        detail: error instanceof Error ? error.message : String(error)
+        detail: stringifyError(error)
       },
       400
     );
@@ -864,8 +1338,30 @@ async function handleCreateNodeChallenge(req: Request): Promise<Response> {
     );
   }
 
+  const walletAuth = await requireWalletRequestAuth(req, normalizedWalletAddress);
+  if (!walletAuth.ok) {
+    logServerFailure("node.challenge.auth_failed", {
+      walletAddress: normalizedWalletAddress,
+      error: walletAuth.error,
+      detail: walletAuth.detail ?? null
+    });
+    return jsonResponse(
+      {
+        ok: false,
+        error: walletAuth.error,
+        detail: walletAuth.detail
+      },
+      walletAuth.status
+    );
+  }
+
   const worldIdAuth = await requireWorldIdForWallet(req, normalizedWalletAddress);
   if (!worldIdAuth.ok) {
+    logServerFailure("node.challenge.world_id_failed", {
+      walletAddress: normalizedWalletAddress,
+      error: worldIdAuth.error,
+      detail: worldIdAuth.detail ?? null
+    });
     return jsonResponse(
       {
         ok: false,
@@ -882,6 +1378,9 @@ async function handleCreateNodeChallenge(req: Request): Promise<Response> {
     walletAddress: normalizedWalletAddress
   });
   if (!paymentResult.ok) {
+    logServerFailure("node.challenge.payment_failed", {
+      walletAddress: normalizedWalletAddress
+    });
     return paymentResult.response ?? jsonResponse({ ok: false, error: "payment_failed" }, 402);
   }
 
@@ -924,11 +1423,15 @@ async function handleCreateNodeChallenge(req: Request): Promise<Response> {
       201
     );
   } catch (error) {
+    logServerFailure("node.challenge.failed", {
+      walletAddress: normalizedWalletAddress,
+      error: stringifyError(error)
+    });
     return jsonResponse(
       {
         ok: false,
         error: "node_challenge_failed",
-        detail: error instanceof Error ? error.message : String(error)
+        detail: stringifyError(error)
       },
       400
     );
@@ -957,6 +1460,24 @@ async function handleActivateNodeChallenge(req: Request): Promise<Response> {
   }
 
   try {
+    const walletAuth = await requireWalletRequestAuth(req, body.walletAddress);
+    if (!walletAuth.ok) {
+      logServerFailure("node.activate.auth_failed", {
+        walletAddress: body.walletAddress,
+        challengeId: body.challengeId,
+        error: walletAuth.error,
+        detail: walletAuth.detail ?? null
+      });
+      return jsonResponse(
+        {
+          ok: false,
+          error: walletAuth.error,
+          detail: walletAuth.detail
+        },
+        walletAuth.status
+      );
+    }
+
     const result = await activateNodeRegistrationChallenge({
       challengeId: body.challengeId,
       walletAddress: body.walletAddress,
@@ -989,11 +1510,16 @@ async function handleActivateNodeChallenge(req: Request): Promise<Response> {
       200
     );
   } catch (error) {
+    logServerFailure("node.activate.failed", {
+      walletAddress: body.walletAddress,
+      challengeId: body.challengeId,
+      error: stringifyError(error)
+    });
     return jsonResponse(
       {
         ok: false,
         error: "node_activation_failed",
-        detail: error instanceof Error ? error.message : String(error)
+        detail: stringifyError(error)
       },
       400
     );
@@ -1039,6 +1565,24 @@ async function handleNodeHeartbeat(req: Request): Promise<Response> {
 
   try {
     const normalizedWallet = normalizeAddress(body.walletAddress);
+    const walletAuth = await requireWalletRequestAuth(req, normalizedWallet);
+    if (!walletAuth.ok) {
+      logServerFailure("node.heartbeat.auth_failed", {
+        walletAddress: normalizedWallet,
+        endpointUrl,
+        error: walletAuth.error,
+        detail: walletAuth.detail ?? null
+      });
+      return jsonResponse(
+        {
+          ok: false,
+          error: walletAuth.error,
+          detail: walletAuth.detail
+        },
+        walletAuth.status
+      );
+    }
+
     const heartbeatMessage = buildNodeHeartbeatMessage({
       walletAddress: normalizedWallet,
       endpointUrl,
@@ -1046,6 +1590,11 @@ async function handleNodeHeartbeat(req: Request): Promise<Response> {
     });
     const recovered = normalizeAddress(verifyMessage(heartbeatMessage, body.signature));
     if (recovered !== normalizedWallet) {
+      logServerFailure("node.heartbeat.signature_invalid", {
+        walletAddress: normalizedWallet,
+        endpointUrl,
+        timestamp
+      });
       return jsonResponse({ ok: false, error: "heartbeat_signature_invalid" }, 401);
     }
 
@@ -1086,11 +1635,16 @@ async function handleNodeHeartbeat(req: Request): Promise<Response> {
       }
     });
   } catch (error) {
+    logServerFailure("node.heartbeat.failed", {
+      walletAddress: body.walletAddress,
+      endpointUrl,
+      error: stringifyError(error)
+    });
     return jsonResponse(
       {
         ok: false,
         error: "node_heartbeat_failed",
-        detail: error instanceof Error ? error.message : String(error)
+        detail: stringifyError(error)
       },
       400
     );
@@ -1228,9 +1782,13 @@ async function router(req: Request): Promise<Response> {
   return jsonResponse({ ok: false, error: "not_found" }, 404);
 }
 
+assertStartupConfigOrThrow();
+
 Bun.serve({
   port: PORT,
   fetch: router
 });
 
-console.log(`[orchestrator] listening on http://localhost:${PORT}`);
+logServerEvent("info", "startup.server.listening", {
+  port: PORT
+});

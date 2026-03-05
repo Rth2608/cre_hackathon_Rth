@@ -11,10 +11,10 @@ import type {
   MarketRequestInput,
   NodeId,
   NodeReport,
+  RuntimeNode,
   RegisteredNode,
   SignedNodeReport
 } from "./types";
-import { runRuntimeNode, type RuntimeNode } from "./mockNodes";
 import { hashObject, nowIso } from "./utils";
 
 interface EndpointDispatchParams {
@@ -24,8 +24,18 @@ interface EndpointDispatchParams {
   activeNodes: RegisteredNode[];
   timeoutMs: number;
   verifyPath: string;
-  fallbackToMock: boolean;
   requireSignedReports?: boolean;
+}
+
+function stringifyError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+function logEndpointFailure(event: string, payload: Record<string, unknown>): void {
+  console.error(`${nowIso()} ${event} ${JSON.stringify(payload)}`);
 }
 
 function normalizeNodeId(value: string): string {
@@ -186,10 +196,10 @@ function resolveDonDomainFromEnv(): DonEip712Domain {
     throw new Error("CHAIN_ID must be a positive integer");
   }
 
-  const verifyingContract =
-    process.env.DON_VERIFIER_CONTRACT?.trim() ||
-    process.env.CONTRACT_ADDRESS?.trim() ||
-    "0x0000000000000000000000000000000000000001";
+  const verifyingContract = process.env.DON_VERIFIER_CONTRACT?.trim() || process.env.CONTRACT_ADDRESS?.trim();
+  if (!verifyingContract) {
+    throw new Error("DON_VERIFIER_CONTRACT or CONTRACT_ADDRESS is required");
+  }
 
   return buildDonDomain({
     name: process.env.DON_DOMAIN_NAME?.trim() || "CRE-DON-Consensus",
@@ -276,32 +286,18 @@ export async function runAllRuntimeNodesViaEndpoints(params: EndpointDispatchPar
     nodes.map(async (runtimeNode) => {
       const endpointUrl = resolveEndpointForRuntimeNode(runtimeNode, params.activeNodes);
       if (!endpointUrl) {
-        if (params.fallbackToMock) {
-          return {
-            report: await runRuntimeNode(params.requestId, params.input, runtimeNode)
-          };
-        }
         throw new Error("endpoint_missing");
       }
 
-      try {
-        return await runEndpointNode({
-          requestId: params.requestId,
-          input: params.input,
-          runtimeNode,
-          endpointUrl,
-          timeoutMs: params.timeoutMs,
-          verifyPath: params.verifyPath,
-          requireSignedReports
-        });
-      } catch (error) {
-        if (params.fallbackToMock) {
-          return {
-            report: await runRuntimeNode(params.requestId, params.input, runtimeNode)
-          };
-        }
-        throw error;
-      }
+      return await runEndpointNode({
+        requestId: params.requestId,
+        input: params.input,
+        runtimeNode,
+        endpointUrl,
+        timeoutMs: params.timeoutMs,
+        verifyPath: params.verifyPath,
+        requireSignedReports
+      });
     })
   );
 
@@ -322,9 +318,15 @@ export async function runAllRuntimeNodesViaEndpoints(params: EndpointDispatchPar
       }
       return;
     }
+    const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+    logEndpointFailure("runtime.endpoint.verify_failed", {
+      requestId: params.requestId,
+      nodeId,
+      reason
+    });
     failures.push({
       nodeId,
-      reason: result.reason instanceof Error ? result.reason.message : String(result.reason)
+      reason
     });
   });
 
@@ -377,35 +379,45 @@ export async function collectConsensusBundleSignaturesViaEndpoints(args: {
 
   const reportSignatures = await Promise.all(
     includedOperators.map(async (operator) => {
-      const endpointUrl = resolveEndpointForOperator(operator, args.activeNodes);
-      if (!endpointUrl) {
-        throw new Error(`bundle_approval_endpoint_missing:${operator}`);
-      }
+      try {
+        const endpointUrl = resolveEndpointForOperator(operator, args.activeNodes);
+        if (!endpointUrl) {
+          throw new Error(`bundle_approval_endpoint_missing:${operator}`);
+        }
 
-      const raw = await postJson(endpointUrl, bundleApprovalPath, args.timeoutMs, {
-        bundleHash: approvalPayload.bundleHash,
-        requestId: approvalPayload.requestId,
-        round: approvalPayload.round,
-        operator
-      });
-      const root = (raw as Record<string, unknown>) ?? {};
-      const data = ((root.data as Record<string, unknown>) ?? root) as Record<string, unknown>;
-      const signature = String(data.signature ?? "").trim();
-      const returnedOperator = normalizeAddress(String(data.operator ?? operator));
+        const raw = await postJson(endpointUrl, bundleApprovalPath, args.timeoutMs, {
+          bundleHash: approvalPayload.bundleHash,
+          requestId: approvalPayload.requestId,
+          round: approvalPayload.round,
+          operator
+        });
+        const root = (raw as Record<string, unknown>) ?? {};
+        const data = ((root.data as Record<string, unknown>) ?? root) as Record<string, unknown>;
+        const signature = String(data.signature ?? "").trim();
+        const returnedOperator = normalizeAddress(String(data.operator ?? operator));
 
-      if (!/^0x[0-9a-fA-F]{130}$/.test(signature)) {
-        throw new Error(`bundle_approval_signature_invalid_format:${operator}`);
-      }
-      if (returnedOperator !== operator) {
-        throw new Error(`bundle_approval_operator_mismatch:${operator}`);
-      }
+        if (!/^0x[0-9a-fA-F]{130}$/.test(signature)) {
+          throw new Error(`bundle_approval_signature_invalid_format:${operator}`);
+        }
+        if (returnedOperator !== operator) {
+          throw new Error(`bundle_approval_operator_mismatch:${operator}`);
+        }
 
-      const verified = verifyOperatorBundleApprovalSignature(domain, approvalPayload, signature, operator);
-      if (!verified.ok) {
-        throw new Error(`bundle_approval_signature_invalid:${operator}:${verified.reason ?? "invalid_signature"}`);
-      }
+        const verified = verifyOperatorBundleApprovalSignature(domain, approvalPayload, signature, operator);
+        if (!verified.ok) {
+          throw new Error(`bundle_approval_signature_invalid:${operator}:${verified.reason ?? "invalid_signature"}`);
+        }
 
-      return signature;
+        return signature;
+      } catch (error) {
+        logEndpointFailure("runtime.bundle.operator_signature_failed", {
+          requestId: args.bundle.payload.requestId,
+          round: args.bundle.payload.round,
+          operator,
+          error: stringifyError(error)
+        });
+        throw error;
+      }
     })
   );
 
@@ -424,34 +436,44 @@ export async function collectConsensusBundleSignaturesViaEndpoints(args: {
     throw new Error(`leader_endpoint_missing:${selectedLeader}`);
   }
 
-  const leaderRaw = await postJson(leaderEndpoint, leaderSignPath, args.timeoutMs, {
-    payload: args.bundle.payload,
-    leader: selectedLeader
-  });
-  const leaderRoot = (leaderRaw as Record<string, unknown>) ?? {};
-  const leaderData = ((leaderRoot.data as Record<string, unknown>) ?? leaderRoot) as Record<string, unknown>;
-  const leader = normalizeAddress(String(leaderData.leader ?? selectedLeader));
-  const leaderSignature = String(leaderData.leaderSignature ?? "").trim();
+  try {
+    const leaderRaw = await postJson(leaderEndpoint, leaderSignPath, args.timeoutMs, {
+      payload: args.bundle.payload,
+      leader: selectedLeader
+    });
+    const leaderRoot = (leaderRaw as Record<string, unknown>) ?? {};
+    const leaderData = ((leaderRoot.data as Record<string, unknown>) ?? leaderRoot) as Record<string, unknown>;
+    const leader = normalizeAddress(String(leaderData.leader ?? selectedLeader));
+    const leaderSignature = String(leaderData.leaderSignature ?? "").trim();
 
-  if (leader !== selectedLeader) {
-    throw new Error(`leader_signature_operator_mismatch:${selectedLeader}`);
+    if (leader !== selectedLeader) {
+      throw new Error(`leader_signature_operator_mismatch:${selectedLeader}`);
+    }
+    if (!/^0x[0-9a-fA-F]{130}$/.test(leaderSignature)) {
+      throw new Error("leader_signature_invalid_format");
+    }
+
+    const signedBundle: ConsensusBundle = {
+      ...args.bundle,
+      leader,
+      leaderSignature,
+      includedOperators,
+      reportSignatures
+    };
+
+    const verifiedLeader = verifyConsensusBundleLeaderSignature(domain, signedBundle);
+    if (!verifiedLeader.ok) {
+      throw new Error(`leader_signature_invalid:${verifiedLeader.reason ?? "invalid_signature"}`);
+    }
+
+    return signedBundle;
+  } catch (error) {
+    logEndpointFailure("runtime.bundle.leader_signature_failed", {
+      requestId: args.bundle.payload.requestId,
+      round: args.bundle.payload.round,
+      leader: selectedLeader,
+      error: stringifyError(error)
+    });
+    throw error;
   }
-  if (!/^0x[0-9a-fA-F]{130}$/.test(leaderSignature)) {
-    throw new Error("leader_signature_invalid_format");
-  }
-
-  const signedBundle: ConsensusBundle = {
-    ...args.bundle,
-    leader,
-    leaderSignature,
-    includedOperators,
-    reportSignatures
-  };
-
-  const verifiedLeader = verifyConsensusBundleLeaderSignature(domain, signedBundle);
-  if (!verifiedLeader.ok) {
-    throw new Error(`leader_signature_invalid:${verifiedLeader.reason ?? "invalid_signature"}`);
-  }
-
-  return signedBundle;
 }

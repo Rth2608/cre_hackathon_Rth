@@ -21,7 +21,7 @@ interface StoredWorldIdSession {
   clientSource?: WorldIdClientSource;
   issuedAt: string;
   expiresAt: string;
-  source: "world_id_cloud" | "assume";
+  source: "world_id_cloud";
 }
 
 export interface WorldIdSession {
@@ -35,7 +35,7 @@ export interface WorldIdSession {
   clientSource?: WorldIdClientSource;
   issuedAt: string;
   expiresAt: string;
-  source: "world_id_cloud" | "assume";
+  source: "world_id_cloud";
 }
 
 export interface WorldIdProofInput {
@@ -387,18 +387,6 @@ function resolveWorldIdSessionTtlSeconds(): number {
   return parsed;
 }
 
-function parseBooleanEnv(value: string | undefined, fallback: boolean): boolean {
-  if (value === undefined) return fallback;
-  const normalized = value.trim().toLowerCase();
-  if (["true", "1", "yes", "y", "on"].includes(normalized)) return true;
-  if (["false", "0", "no", "n", "off"].includes(normalized)) return false;
-  return fallback;
-}
-
-export function isWorldIdAssumeEnabled(): boolean {
-  return parseBooleanEnv(process.env.ASSUME_WORLD_ID_VERIFIED, false);
-}
-
 async function loadDb(): Promise<WorldIdSessionDbSchema> {
   await ensureDir(resolveProjectPath("data"));
   return readJsonFile<WorldIdSessionDbSchema>(WORLD_ID_DB_PATH, {
@@ -423,7 +411,7 @@ function normalizeStoredSession(session: StoredWorldIdSession): StoredWorldIdSes
     clientSource: normalizeClientSource(session.clientSource),
     issuedAt: session.issuedAt,
     expiresAt: session.expiresAt,
-    source: session.source === "assume" ? "assume" : "world_id_cloud"
+    source: "world_id_cloud"
   };
 }
 
@@ -483,7 +471,7 @@ async function runWorldVerifyRequest(input: { verifyUrl: string; requestBody: Re
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "User-Agent": "cre-don-world-id-demo/1.0"
+        "User-Agent": "cre-don-world-id/1.0"
       },
       body: JSON.stringify(input.requestBody),
       signal: controller.signal
@@ -606,7 +594,6 @@ function buildSession(input: {
   verificationLevel?: string;
   profileId?: string;
   clientSource?: WorldIdClientSource;
-  source: "world_id_cloud" | "assume";
 }): StoredWorldIdSession {
   const issuedAt = nowIso();
   const expiresAt = new Date(Date.now() + resolveWorldIdSessionTtlSeconds() * 1000).toISOString();
@@ -621,7 +608,7 @@ function buildSession(input: {
     clientSource: input.clientSource,
     issuedAt,
     expiresAt,
-    source: input.source
+    source: "world_id_cloud"
   };
 }
 
@@ -669,34 +656,6 @@ export async function issueWorldIdSessionFromProof(input: {
     throw new Error(`world_id_action_mismatch: expected ${selectedProfile.action}, got ${parsedProof.action}`);
   }
 
-  if (isWorldIdAssumeEnabled()) {
-    const db = await loadDbWithPrune();
-    if (
-      nullifierBoundToDifferentWallet({
-        db,
-        nullifierHash: parsedProof.nullifierHash,
-        walletAddress: normalizedWalletAddress
-      })
-    ) {
-      throw new Error("world_id_nullifier_already_bound_to_different_wallet");
-    }
-
-    const session = buildSession({
-      walletAddress: normalizedWalletAddress,
-      nullifierHash: parsedProof.nullifierHash,
-      appId: selectedProfile.appId,
-      action: selectedProfile.action,
-      verificationLevel: parsedProof.verificationLevel,
-      profileId: selectedProfile.id,
-      clientSource: requestedClientSource,
-      source: "assume"
-    });
-    db.sessions[session.token] = session;
-    db.nullifierWalletMap[session.nullifierHash] = session.walletAddress;
-    await saveDb(db);
-    return toPublicSession(session);
-  }
-
   const verifyResult = await verifyWithWorldCloud({
     appId: selectedProfile.appId,
     proofPayload: parsedProof
@@ -726,8 +685,7 @@ export async function issueWorldIdSessionFromProof(input: {
     action: selectedProfile.action,
     verificationLevel: parsedProof.verificationLevel,
     profileId: selectedProfile.id,
-    clientSource: requestedClientSource,
-    source: "world_id_cloud"
+    clientSource: requestedClientSource
   });
 
   db.sessions[session.token] = session;

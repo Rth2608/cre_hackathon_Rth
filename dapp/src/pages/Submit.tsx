@@ -13,13 +13,10 @@ import {
 } from "../lib/worldChain";
 
 const defaultForm: MarketRequestInput = {
-  question: "Will BTC close above $100,000 on 2026-12-31 UTC?",
-  description: "Prediction market validation demo request",
-  sourceUrls: [
-    "https://www.reuters.com/world/us/example-story",
-    "https://www.bloomberg.com/news/articles/example-story"
-  ],
-  resolutionCriteria: "Use Reuters or Bloomberg market close report as canonical source.",
+  question: "",
+  description: "",
+  sourceUrls: [],
+  resolutionCriteria: "",
   submitterAddress: ""
 };
 
@@ -139,7 +136,7 @@ export default function SubmitPage() {
         : walletBalanceError
           ? "Failed to load"
           : "-";
-  const chainText = `World Chain Sepolia (virtual, id: ${worldChainVirtualConfig.chainId})`;
+  const chainText = `${worldChainVirtualConfig.chainName} (virtual, id: ${worldChainVirtualConfig.chainId})`;
   const connectedChainText = activeChain ? `${activeChain.name} (id: ${activeChain.id})` : "Not connected";
   const connectedChainMismatch = Boolean(activeChain && activeChain.id !== worldChainVirtualConfig.chainId);
   const requestCreateReady = walletConnected && thirdwebConfigured;
@@ -182,7 +179,7 @@ export default function SubmitPage() {
       return;
     }
 
-    if (!walletConnected) {
+    if (!walletConnected || !activeAccount) {
       setError("Connect wallet before creating a request.");
       setSubmitting(false);
       return;
@@ -199,7 +196,7 @@ export default function SubmitPage() {
     }
 
     try {
-      const created = await createRequestForWallet(form, walletAddress, worldIdSession.token);
+      const created = await createRequestForWallet(form, walletAddress, worldIdSession.token, activeAccount);
       // Request creation consumes World ID token on server. Force re-verify for next request.
       clearWorldIdSession(walletAddress);
       setWorldIdSession(null);
@@ -222,7 +219,7 @@ export default function SubmitPage() {
       <main className="panel">
         <AppNav current="submit" />
         <header className="hero">
-          <p className="eyebrow">CRE + DON Consensus Demo</p>
+          <p className="eyebrow">CRE + DON Consensus</p>
           <h1>Submit Market Verification Request</h1>
           <p>
             Enter market question, evidence URLs, and resolver criteria. On submit, the orchestrator immediately
@@ -248,7 +245,7 @@ export default function SubmitPage() {
             {walletConnected && <p className="wallet-info mono">Connected: {walletAddress}</p>}
             {walletConnected && (
               <p className="wallet-info mono">
-                Virtual Balance (World Chain Sepolia): {nativeBalanceText}
+                Virtual Balance ({worldChainVirtualConfig.chainName}): {nativeBalanceText}
               </p>
             )}
           </div>
@@ -271,7 +268,7 @@ export default function SubmitPage() {
               <p className="wallet-info small">Connected wallet chain: {connectedChainText}</p>
               {connectedChainMismatch && (
                 <p className="config-warning">
-                  Connected chain differs. Balance/verification display is fixed to virtual World Chain Sepolia.
+                  Connected chain differs. Balance/verification display is fixed to virtual {worldChainVirtualConfig.chainName}.
                 </p>
               )}
             </div>
@@ -288,7 +285,7 @@ export default function SubmitPage() {
               </p>
             </div>
             <div className="snapshot-item">
-              <p className="snapshot-label">World Chain Sepolia</p>
+              <p className="snapshot-label">{worldChainVirtualConfig.chainName}</p>
               <p className="wallet-info">chain id: {worldChainVirtualConfig.chainId}</p>
               <p className="wallet-info small mono">
                 rpc: {worldChainVirtualConfig.rpcUrl || "thirdweb default rpc"}
@@ -300,9 +297,7 @@ export default function SubmitPage() {
               {!thirdwebConfigured ? (
                 <p className="config-warning">Set VITE_THIRDWEB_CLIENT_ID first.</p>
               ) : worldChainVirtualConfig.tokenAddresses.length === 0 ? (
-                <p className="config-warning">
-                  Set <code>VITE_WORLDCHAIN_VIRTUAL_TOKEN_ADDRESSES</code> to show ERC20 test token balances.
-                </p>
+                <p className="wallet-info small">No ERC20 virtual tokens configured.</p>
               ) : worldChainBalancesLoading ? (
                 <p className="wallet-info mono">Loading token balances...</p>
               ) : worldChainBalancesError ? (

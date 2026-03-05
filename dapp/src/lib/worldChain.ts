@@ -2,15 +2,16 @@ import { defineChain } from "thirdweb";
 import { getWalletBalance } from "thirdweb/wallets";
 import { thirdwebClient } from "./thirdweb";
 
-const DEFAULT_WORLDCHAIN_SEPOLIA_CHAIN_ID = 4801;
-const rawWorldChainSepoliaChainId = Number.parseInt((import.meta.env.VITE_WORLDCHAIN_SEPOLIA_CHAIN_ID || "4801").trim(), 10);
+const DEFAULT_WORLDCHAIN_SEPOLIA_CHAIN_ID = 11155111;
+const rawWorldChainSepoliaChainId = Number.parseInt((import.meta.env.VITE_WORLDCHAIN_SEPOLIA_CHAIN_ID || "11155111").trim(), 10);
 const worldChainSepoliaChainId = Number.isInteger(rawWorldChainSepoliaChainId) && rawWorldChainSepoliaChainId > 0
   ? rawWorldChainSepoliaChainId
   : DEFAULT_WORLDCHAIN_SEPOLIA_CHAIN_ID;
 const worldChainSepoliaRpcUrl = (import.meta.env.VITE_WORLDCHAIN_SEPOLIA_RPC_URL || "").trim();
+const virtualChainName = (import.meta.env.VITE_WORLDCHAIN_NETWORK_NAME || "Ethereum Sepolia (Virtual)").trim();
 
 const virtualTokenEnvList = (import.meta.env.VITE_WORLDCHAIN_VIRTUAL_TOKEN_ADDRESSES || "").trim();
-const fallbackStakeTokenAddress = (import.meta.env.VITE_STAKE_TOKEN_ADDRESS || "").trim();
+const configuredStakeTokenAddress = (import.meta.env.VITE_STAKE_TOKEN_ADDRESS || "").trim();
 
 function isLikelyEvmAddress(value: string): boolean {
   return /^0x[a-fA-F0-9]{40}$/.test(value.trim());
@@ -22,7 +23,7 @@ function parseVirtualTokenAddresses(): string[] {
     .map((value: string) => value.trim());
   const combined = [
     ...envTokens,
-    fallbackStakeTokenAddress
+    configuredStakeTokenAddress
   ]
     .map((value: string) => value.trim())
     .filter(Boolean)
@@ -37,13 +38,13 @@ export const worldChainSepoliaChain = defineChain(
   worldChainSepoliaRpcUrl
     ? {
         id: worldChainSepoliaChainId,
-        name: "World Chain Sepolia",
+        name: virtualChainName,
         rpc: worldChainSepoliaRpcUrl,
         testnet: true
       }
     : {
         id: worldChainSepoliaChainId,
-        name: "World Chain Sepolia",
+        name: virtualChainName,
         testnet: true
       }
 );
@@ -63,11 +64,13 @@ export interface WorldChainVirtualBalanceSnapshot {
 
 export function getWorldChainVirtualConfig(): {
   chainId: number;
+  chainName: string;
   rpcUrl: string;
   tokenAddresses: string[];
 } {
   return {
     chainId: worldChainSepoliaChainId,
+    chainName: virtualChainName,
     rpcUrl: worldChainSepoliaRpcUrl,
     tokenAddresses: worldChainVirtualTokenAddresses
   };

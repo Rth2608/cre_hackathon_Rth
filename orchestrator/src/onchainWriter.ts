@@ -1,6 +1,6 @@
 import { AbiCoder, Contract, JsonRpcProvider, Wallet, getAddress, id } from "ethers";
 import type { ConsensusBundle, ConsensusResult, MarketRequestInput, OnchainReceipt } from "./types";
-import { hashObject } from "./utils";
+import { hashObject, readJsonFile, resolveProjectPath, writeJsonFileAtomic } from "./utils";
 import { hashConsensusBundlePayload } from "./donSignatures";
 import { DON_CONSENSUS_ABI, LEGACY_REGISTRY_ABI } from "./contractAbi";
 
@@ -30,12 +30,122 @@ export interface SubmitPorProofParams {
   proofUri: string;
 }
 
+interface OnchainSubmissionDbSchema {
+  receipts: Record<string, OnchainReceipt>;
+}
+
+const ONCHAIN_SUBMISSION_DB_PATH = resolveProjectPath("data", "onchain-submissions.json");
+const DEFAULT_ONCHAIN_SUBMIT_MAX_ATTEMPTS = 3;
+const DEFAULT_ONCHAIN_SUBMIT_RETRY_DELAY_MS = 1200;
+
 function requireEnv(name: string): string {
   const value = process.env[name];
   if (!value || value.trim().length === 0) {
     throw new Error(`Missing required environment variable: ${name}`);
   }
   return value.trim();
+}
+
+function stringifyError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+function resolveOnchainSubmitMaxAttempts(): number {
+  const raw = process.env.ONCHAIN_SUBMIT_MAX_ATTEMPTS?.trim();
+  if (!raw) return DEFAULT_ONCHAIN_SUBMIT_MAX_ATTEMPTS;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 8) {
+    return DEFAULT_ONCHAIN_SUBMIT_MAX_ATTEMPTS;
+  }
+  return parsed;
+}
+
+function resolveOnchainSubmitRetryDelayMs(): number {
+  const raw = process.env.ONCHAIN_SUBMIT_RETRY_DELAY_MS?.trim();
+  if (!raw) return DEFAULT_ONCHAIN_SUBMIT_RETRY_DELAY_MS;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isInteger(parsed) || parsed < 100 || parsed > 30_000) {
+    return DEFAULT_ONCHAIN_SUBMIT_RETRY_DELAY_MS;
+  }
+  return parsed;
+}
+
+function isRetryableOnchainError(error: unknown): boolean {
+  const message = stringifyError(error).toLowerCase();
+  if (!message) {
+    return false;
+  }
+
+  if (
+    message.includes("execution reverted") ||
+    message.includes("reverted") ||
+    message.includes("invalid opcode") ||
+    message.includes("insufficient funds")
+  ) {
+    return false;
+  }
+
+  return (
+    message.includes("network") ||
+    message.includes("timeout") ||
+    message.includes("timed out") ||
+    message.includes("socket") ||
+    message.includes("econnreset") ||
+    message.includes("econnrefused") ||
+    message.includes("503") ||
+    message.includes("502") ||
+    message.includes("504") ||
+    message.includes("rate limit") ||
+    message.includes("temporarily unavailable") ||
+    message.includes("load failed")
+  );
+}
+
+async function waitMs(delayMs: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+async function readOnchainSubmissionDb(): Promise<OnchainSubmissionDbSchema> {
+  const fallback: OnchainSubmissionDbSchema = { receipts: {} };
+  const parsed = await readJsonFile<OnchainSubmissionDbSchema>(ONCHAIN_SUBMISSION_DB_PATH, fallback);
+  if (!parsed || typeof parsed !== "object") {
+    return fallback;
+  }
+  if (!parsed.receipts || typeof parsed.receipts !== "object") {
+    return fallback;
+  }
+  return parsed;
+}
+
+async function writeOnchainSubmissionDb(db: OnchainSubmissionDbSchema): Promise<void> {
+  await writeJsonFileAtomic(ONCHAIN_SUBMISSION_DB_PATH, db);
+}
+
+function buildConsensusIdempotencyKey(input: {
+  contractAddress: string;
+  chainIdFromEnv?: number;
+  params: SubmitOnchainParams;
+  useBundleFinalize: boolean;
+}): string {
+  return hashObject({
+    scope: "submit_consensus_onchain",
+    contractAddress: input.contractAddress.toLowerCase(),
+    chainId: input.chainIdFromEnv ?? null,
+    mode: input.useBundleFinalize ? "bundle" : "legacy",
+    requestId: input.params.requestId.toLowerCase(),
+    requestHash: buildRequestHash(input.params.input),
+    reportUri: input.params.reportUri,
+    consensus: {
+      aggregateScoreBps: input.params.consensus.aggregateScoreBps,
+      finalVerdict: input.params.consensus.finalVerdict,
+      responders: input.params.consensus.responders,
+      finalReportHash: input.params.consensus.finalReportHash
+    },
+    bundleHash: input.params.consensusBundle?.bundleHash ?? null
+  });
 }
 
 function toBytes32(hexOrString: string): string {
@@ -107,77 +217,6 @@ function encodeDonFinalizeInput(params: SubmitOnchainParams): string {
   );
 }
 
-function buildMockReceipt(params: SubmitOnchainParams): OnchainReceipt {
-  const txHash = toBytes32(
-    hashObject({
-      requestId: params.requestId,
-      verdict: params.consensus.finalVerdict,
-      aggregateScoreBps: params.consensus.aggregateScoreBps,
-      reportUri: params.reportUri,
-      bundleHash: params.consensusBundle?.bundleHash
-    })
-  );
-
-  return {
-    txHash,
-    blockNumber: 0,
-    gasUsed: "0",
-    chainId: Number.parseInt(process.env.CHAIN_ID ?? "0", 10) || 0,
-    explorerUrl: process.env.TENDERLY_TX_BASE_URL
-      ? `${process.env.TENDERLY_TX_BASE_URL.replace(/\/$/, "")}/${txHash}`
-      : undefined,
-    simulated: true
-  };
-}
-
-function buildMockNodeLifecycleReceipt(params: SubmitNodeLifecycleParams): OnchainReceipt {
-  const txHash = toBytes32(
-    hashObject({
-      nodeId: params.nodeId.toLowerCase(),
-      action: params.action,
-      endpointUrl: params.endpointUrl,
-      payloadHash: params.payloadHash,
-      payloadUri: params.payloadUri,
-      lifecycleId: params.lifecycleId ?? null
-    })
-  );
-
-  return {
-    txHash,
-    blockNumber: 0,
-    gasUsed: "0",
-    chainId: Number.parseInt(process.env.CHAIN_ID ?? "0", 10) || 0,
-    explorerUrl: process.env.TENDERLY_TX_BASE_URL
-      ? `${process.env.TENDERLY_TX_BASE_URL.replace(/\/$/, "")}/${txHash}`
-      : undefined,
-    simulated: true
-  };
-}
-
-function buildMockPorReceipt(params: SubmitPorProofParams): OnchainReceipt {
-  const txHash = toBytes32(
-    hashObject({
-      marketId: params.marketId,
-      epoch: params.epoch,
-      assetsMicroUsdc: params.assetsMicroUsdc,
-      liabilitiesMicroUsdc: params.liabilitiesMicroUsdc,
-      proofHash: params.proofHash,
-      proofUri: params.proofUri
-    })
-  );
-
-  return {
-    txHash,
-    blockNumber: 0,
-    gasUsed: "0",
-    chainId: Number.parseInt(process.env.CHAIN_ID ?? "0", 10) || 0,
-    explorerUrl: process.env.TENDERLY_TX_BASE_URL
-      ? `${process.env.TENDERLY_TX_BASE_URL.replace(/\/$/, "")}/${txHash}`
-      : undefined,
-    simulated: true
-  };
-}
-
 function toNodeActionCode(action: SubmitNodeLifecycleParams["action"]): number {
   return action === "ACTIVATED" ? 1 : 2;
 }
@@ -198,12 +237,8 @@ function resolveNodeLifecycleId(params: SubmitNodeLifecycleParams): string {
 }
 
 export async function submitConsensusOnchain(params: SubmitOnchainParams): Promise<OnchainReceipt> {
-  if (process.env.USE_MOCK_ONCHAIN === "true") {
-    return buildMockReceipt(params);
-  }
-
   const rpcUrl = requireEnv("RPC_URL");
-  const contractAddress = requireEnv("CONTRACT_ADDRESS");
+  const contractAddress = getAddress(requireEnv("CONTRACT_ADDRESS"));
   const privateKey = requireEnv("COORDINATOR_PRIVATE_KEY");
 
   const chainIdFromEnv = process.env.CHAIN_ID ? Number.parseInt(process.env.CHAIN_ID, 10) : undefined;
@@ -216,40 +251,86 @@ export async function submitConsensusOnchain(params: SubmitOnchainParams): Promi
   }
   const useBundleFinalize = shouldUseBundleFinalize && params.consensusBundle !== undefined;
   const contract = new Contract(contractAddress, useBundleFinalize ? DON_CONSENSUS_ABI : LEGACY_REGISTRY_ABI, wallet);
+  const idempotencyKey = buildConsensusIdempotencyKey({
+    contractAddress,
+    chainIdFromEnv,
+    params,
+    useBundleFinalize
+  });
+  const retryMaxAttempts = resolveOnchainSubmitMaxAttempts();
+  const retryDelayMs = resolveOnchainSubmitRetryDelayMs();
 
-  const tx = useBundleFinalize
-    ? await contract.finalizeWithBundle(encodeDonFinalizeInput(params))
-    : await contract.finalizeVerification(
-        toBytes32(params.requestId),
-        id(params.input.question),
-        buildSourcesHash(params.input.sourceUrls),
-        params.consensus.aggregateScoreBps,
-        params.consensus.finalVerdict === "PASS",
-        params.consensus.responders,
-        toBytes32(params.consensus.finalReportHash),
-        params.reportUri
+  const db = await readOnchainSubmissionDb();
+  const cachedReceipt = db.receipts[idempotencyKey];
+  if (cachedReceipt) {
+    return {
+      ...cachedReceipt,
+      idempotencyKey,
+      idempotencyReused: true
+    };
+  }
+
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= retryMaxAttempts; attempt += 1) {
+    try {
+      const tx = useBundleFinalize
+        ? await contract.finalizeWithBundle(encodeDonFinalizeInput(params))
+        : await contract.finalizeVerification(
+            toBytes32(params.requestId),
+            id(params.input.question),
+            buildSourcesHash(params.input.sourceUrls),
+            params.consensus.aggregateScoreBps,
+            params.consensus.finalVerdict === "PASS",
+            params.consensus.responders,
+            toBytes32(params.consensus.finalReportHash),
+            params.reportUri
+          );
+
+      const receipt = await tx.wait();
+      const chainId = Number((await provider.getNetwork()).chainId);
+
+      const onchainReceipt: OnchainReceipt = {
+        txHash: tx.hash,
+        blockNumber: receipt.blockNumber,
+        gasUsed: receipt.gasUsed.toString(),
+        chainId,
+        explorerUrl: process.env.TENDERLY_TX_BASE_URL
+          ? `${process.env.TENDERLY_TX_BASE_URL.replace(/\/$/, "")}/${tx.hash}`
+          : undefined,
+        simulated: false,
+        idempotencyKey,
+        idempotencyReused: false,
+        submissionAttempts: attempt
+      };
+
+      db.receipts[idempotencyKey] = onchainReceipt;
+      await writeOnchainSubmissionDb(db);
+      return onchainReceipt;
+    } catch (error) {
+      lastError = error;
+      const retryable = isRetryableOnchainError(error);
+      if (!retryable || attempt >= retryMaxAttempts) {
+        break;
+      }
+      console.warn(
+        `${new Date().toISOString()} onchain.submit.retry ${JSON.stringify({
+          requestId: params.requestId,
+          attempt,
+          maxAttempts: retryMaxAttempts,
+          retryDelayMs,
+          error: stringifyError(error)
+        })}`
       );
+      await waitMs(retryDelayMs * attempt);
+    }
+  }
 
-  const receipt = await tx.wait();
-  const chainId = Number((await provider.getNetwork()).chainId);
-
-  return {
-    txHash: tx.hash,
-    blockNumber: receipt.blockNumber,
-    gasUsed: receipt.gasUsed.toString(),
-    chainId,
-    explorerUrl: process.env.TENDERLY_TX_BASE_URL
-      ? `${process.env.TENDERLY_TX_BASE_URL.replace(/\/$/, "")}/${tx.hash}`
-      : undefined,
-    simulated: false
-  };
+  throw new Error(
+    `onchain_submit_failed: ${stringifyError(lastError)} (requestId=${params.requestId}, attempts=${retryMaxAttempts})`
+  );
 }
 
 export async function submitNodeLifecycleOnchain(params: SubmitNodeLifecycleParams): Promise<OnchainReceipt> {
-  if (process.env.USE_MOCK_ONCHAIN === "true") {
-    return buildMockNodeLifecycleReceipt(params);
-  }
-
   const rpcUrl = requireEnv("RPC_URL");
   const contractAddress = requireEnv("CONTRACT_ADDRESS");
   const privateKey = requireEnv("COORDINATOR_PRIVATE_KEY");
@@ -288,10 +369,6 @@ export async function submitNodeLifecycleOnchain(params: SubmitNodeLifecyclePara
 }
 
 export async function submitPorProofOnchain(params: SubmitPorProofParams): Promise<OnchainReceipt> {
-  if (process.env.USE_MOCK_ONCHAIN === "true") {
-    return buildMockPorReceipt(params);
-  }
-
   const rpcUrl = requireEnv("RPC_URL");
   const contractAddress = requireEnv("CONTRACT_ADDRESS");
   const privateKey = requireEnv("COORDINATOR_PRIVATE_KEY");

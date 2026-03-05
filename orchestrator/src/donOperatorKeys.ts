@@ -1,19 +1,5 @@
 import { Wallet, getAddress } from "ethers";
 
-export const DEFAULT_DON_OPERATOR_PRIVATE_KEYS_BY_NODE_ID: Record<string, string> = {
-  gpt: "0x1000000000000000000000000000000000000000000000000000000000000001",
-  gemini: "0x2000000000000000000000000000000000000000000000000000000000000002",
-  claude: "0x3000000000000000000000000000000000000000000000000000000000000003",
-  grok: "0x4000000000000000000000000000000000000000000000000000000000000004"
-};
-
-export const DEFAULT_DON_OPERATOR_ADDRESS_BY_NODE_ID: Record<string, string> = Object.fromEntries(
-  Object.entries(DEFAULT_DON_OPERATOR_PRIVATE_KEYS_BY_NODE_ID).map(([nodeId, privateKey]) => [
-    nodeId,
-    new Wallet(privateKey).address
-  ])
-);
-
 function normalizePrivateKey(value: string, fieldName: string): string {
   const normalized = value.trim();
   if (!/^0x[0-9a-fA-F]{64}$/.test(normalized)) {
@@ -78,22 +64,6 @@ export function resolveDonSignerPrivateKey(args: {
   }
   if (customMap[nodeId]) {
     return customMap[nodeId]!;
-  }
-
-  const defaultByNodeId = DEFAULT_DON_OPERATOR_PRIVATE_KEYS_BY_NODE_ID[nodeId];
-  if (defaultByNodeId) {
-    const defaultAddress = DEFAULT_DON_OPERATOR_ADDRESS_BY_NODE_ID[nodeId]?.toLowerCase();
-    if (!normalizedOperatorAddress || normalizedOperatorAddress === defaultAddress) {
-      return defaultByNodeId;
-    }
-  }
-
-  if (normalizedOperatorAddress) {
-    for (const [candidateNodeId, address] of Object.entries(DEFAULT_DON_OPERATOR_ADDRESS_BY_NODE_ID)) {
-      if (address.toLowerCase() === normalizedOperatorAddress) {
-        return DEFAULT_DON_OPERATOR_PRIVATE_KEYS_BY_NODE_ID[candidateNodeId] ?? null;
-      }
-    }
   }
 
   return null;

@@ -41,6 +41,13 @@ export interface ConsensusResult {
 
 export type CanonicalModelFamily = "gpt" | "gemini" | "claude" | "grok";
 
+export interface RuntimeNode {
+  nodeId: NodeId;
+  modelFamily: CanonicalModelFamily;
+  modelName: string;
+  operatorAddress: string;
+}
+
 export interface ExecutionReceipt {
   requestId: string;
   round: number;
@@ -173,6 +180,9 @@ export interface OnchainReceipt {
   chainId: number;
   explorerUrl?: string;
   simulated: boolean;
+  idempotencyKey?: string;
+  idempotencyReused?: boolean;
+  submissionAttempts?: number;
 }
 
 export interface StoredRequest {
@@ -190,6 +200,7 @@ export interface StoredRequest {
   onchainReceipt?: OnchainReceipt;
   activeNodes?: RegisteredNode[];
   paymentReceipt?: VerificationPaymentReceipt;
+  workflowStepLogs?: WorkflowStepLog[];
   lastError?: string;
   updatedAt: string;
 }

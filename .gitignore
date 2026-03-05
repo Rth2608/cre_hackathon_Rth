@@ -34,3 +34,6 @@ orchestrator/artifacts/
 
 # OS
 .DS_Store
+
+cre-docs-index.md
+SKILL.md

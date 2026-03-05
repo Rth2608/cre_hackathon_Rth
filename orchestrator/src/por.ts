@@ -1,4 +1,4 @@
-import { hashObject, nowIso, readJsonFile, resolveProjectPath } from "./utils";
+import { hashObject, readJsonFile, resolveProjectPath } from "./utils";
 import { getLatestPorProofFromOnchain, listPorProofsFromOnchain } from "./onchainReader";
 
 const POR_HISTORY_PATH = resolveProjectPath("reports", "por-history.json");
@@ -17,7 +17,7 @@ export interface PorProofSnapshot {
 }
 
 export interface PorStatusPayload {
-  mode: "MOCK" | "FILE" | "ONCHAIN";
+  mode: "FILE" | "ONCHAIN";
   source: string;
   latest: PorProofSnapshot;
   history: PorProofSnapshot[];
@@ -59,64 +59,6 @@ function parseBooleanEnv(value: string | undefined, fallback: boolean): boolean 
   if (["true", "1", "yes", "y", "on"].includes(normalized)) return true;
   if (["false", "0", "no", "n", "off"].includes(normalized)) return false;
   return fallback;
-}
-
-function toSnapshot(
-  marketId: number,
-  epoch: number,
-  assetsMicroUsdc: bigint,
-  liabilitiesMicroUsdc: bigint,
-  txHash?: string,
-  proofUri?: string
-): PorProofSnapshot {
-  const coverageBps =
-    liabilitiesMicroUsdc === 0n ? 0 : Number((assetsMicroUsdc * 10000n) / liabilitiesMicroUsdc);
-  const healthy = liabilitiesMicroUsdc > 0n && coverageBps >= 10000;
-  const updatedAt = nowIso();
-
-  const proofHash = hashObject({
-    marketId,
-    epoch,
-    assetsMicroUsdc: assetsMicroUsdc.toString(),
-    liabilitiesMicroUsdc: liabilitiesMicroUsdc.toString(),
-    coverageBps,
-    healthy,
-    updatedAt
-  });
-
-  return {
-    marketId,
-    epoch,
-    assetsMicroUsdc: assetsMicroUsdc.toString(),
-    liabilitiesMicroUsdc: liabilitiesMicroUsdc.toString(),
-    coverageBps,
-    healthy,
-    proofHash,
-    proofUri,
-    txHash,
-    updatedAt
-  };
-}
-
-function fallbackStatus(): PorStatusPayload {
-  const marketId = parsePositiveInt("POR_MARKET_ID", process.env.POR_MARKET_ID, 1);
-  const epoch = parsePositiveInt("POR_EPOCH", process.env.POR_EPOCH, 1);
-  const assets = parseNonNegativeBigInt("POR_ASSETS_MICROUSDC", process.env.POR_ASSETS_MICROUSDC, 1_000_000_000n);
-  const liabilities = parseNonNegativeBigInt(
-    "POR_LIABILITIES_MICROUSDC",
-    process.env.POR_LIABILITIES_MICROUSDC,
-    950_000_000n
-  );
-  const txHash = process.env.POR_TX_HASH?.trim() || undefined;
-
-  const latest = toSnapshot(marketId, epoch, assets, liabilities, txHash);
-
-  return {
-    mode: "MOCK",
-    source: "env-fallback",
-    latest,
-    history: [latest]
-  };
 }
 
 function resolvePorOnchainReadEnabled(): boolean {
@@ -175,14 +117,13 @@ export async function getPorStatusSnapshot(): Promise<PorStatusPayload> {
     }
   }
 
-  const fallback = fallbackStatus();
   const file = await readJsonFile<PorHistoryFileSchema>(POR_HISTORY_PATH, {
     proofs: []
   });
 
   const sanitized = sanitizeProofs(file.proofs);
   if (sanitized.length === 0) {
-    return fallback;
+    throw new Error("por_data_unavailable: no on-chain PoR proof found and no reports/por-history.json entries");
   }
 
   return {

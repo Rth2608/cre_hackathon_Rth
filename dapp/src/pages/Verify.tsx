@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import {
   IDKitWidget,
   type IErrorState,
@@ -512,6 +512,7 @@ function toMiniVerifyPayload(value: unknown): MiniAppVerifyActionPayload | null 
 }
 
 export default function VerifyPage() {
+  const location = useLocation();
   const activeAccount = useActiveAccount();
   const activeChain = useActiveWalletChain();
   const walletAddress = activeAccount?.address ?? "";
@@ -683,6 +684,10 @@ export default function VerifyPage() {
     action: string;
     clientSource: "miniapp" | "external" | "manual";
   }) => {
+    if (!activeAccount) {
+      throw new Error("wallet_account_required");
+    }
+
     appendWorldIdDebugLog("backend.verify.request", {
       source: input.sourceLabel,
       appId: input.appId,
@@ -696,7 +701,8 @@ export default function VerifyPage() {
         proof: input.proof,
         appId: input.appId,
         action: input.action,
-        clientSource: input.clientSource
+        clientSource: input.clientSource,
+        account: activeAccount
       });
       appendWorldIdDebugLog("backend.verify.success", {
         profileId: result.session.profileId,
@@ -967,7 +973,8 @@ export default function VerifyPage() {
         selectedModelFamilies: nodeForm.selectedModelFamilies,
         stakeAmount: nodeForm.stakeAmount,
         participationEnabled: nodeForm.participationEnabled,
-        worldIdToken: worldIdSession.token
+        worldIdToken: worldIdSession.token,
+        account: activeAccount
       });
       const challenge = challengeResult.challenge;
       const signature = await signMessage({
@@ -978,7 +985,8 @@ export default function VerifyPage() {
       const activated = await activateNodeChallenge({
         challengeId: challenge.challengeId,
         walletAddress,
-        signature
+        signature,
+        account: activeAccount
       });
 
       const health = activated.endpointProbe.ok ? "HEALTHY" : `UNHEALTHY (${activated.endpointProbe.error ?? "unknown"})`;
@@ -1019,7 +1027,7 @@ export default function VerifyPage() {
           : stakeTokenBalanceError
             ? "Failed to load"
             : "-";
-  const chainText = `World Chain Sepolia (virtual, id: ${worldChainVirtualConfig.chainId})`;
+  const chainText = `${worldChainVirtualConfig.chainName} (virtual, id: ${worldChainVirtualConfig.chainId})`;
   const connectedChainText = activeChain ? `${activeChain.name} (id: ${activeChain.id})` : "Not connected";
   const connectedChainMismatch = Boolean(activeChain && activeChain.id !== worldChainVirtualConfig.chainId);
   const worldIdStatus = worldIdSession
@@ -1107,7 +1115,8 @@ export default function VerifyPage() {
         walletAddress,
         endpointUrl: myActiveNode.endpointUrl,
         timestamp,
-        signature
+        signature,
+        account: activeAccount
       });
 
       const lifecycleTx = result.lifecycleOnchainReceipt?.txHash ? `, tx=${result.lifecycleOnchainReceipt.txHash}` : "";
@@ -1121,6 +1130,15 @@ export default function VerifyPage() {
       setSendingHeartbeat(false);
     }
   };
+
+  const returnToPath = useMemo(() => {
+    const params = new URLSearchParams(location.search);
+    const raw = params.get("returnTo")?.trim() ?? "";
+    if (!raw || !raw.startsWith("/") || raw.startsWith("//")) {
+      return null;
+    }
+    return raw;
+  }, [location.search]);
 
   const toggleModelFamily = (family: ModelFamily) => {
     setNodeForm((prev) => {
@@ -1162,7 +1180,7 @@ export default function VerifyPage() {
             {walletConnected && <p className="wallet-info mono">Connected: {walletAddress}</p>}
             {walletConnected && (
               <p className="wallet-info mono">
-                Virtual Balance (World Chain Sepolia):{" "}
+                Virtual Balance ({worldChainVirtualConfig.chainName}):{" "}
                 {walletBalanceLoading
                   ? "Loading..."
                   : walletBalance
@@ -1177,6 +1195,11 @@ export default function VerifyPage() {
             <Link to="/" className="text-link">
               Back to Request
             </Link>
+            {returnToPath && (
+              <Link to={returnToPath} className="text-link">
+                Back to Previous Page
+              </Link>
+            )}
             <button type="button" className="secondary" onClick={load}>
               Refresh List
             </button>
@@ -1205,7 +1228,7 @@ export default function VerifyPage() {
               <p className="wallet-info small">Connected wallet chain: {connectedChainText}</p>
               {connectedChainMismatch && (
                 <p className="config-warning">
-                  Connected chain differs. Balance/verification display is fixed to virtual World Chain Sepolia.
+                  Connected chain differs. Balance/verification display is fixed to virtual {worldChainVirtualConfig.chainName}.
                 </p>
               )}
             </div>
@@ -1231,7 +1254,7 @@ export default function VerifyPage() {
               <p className="wallet-info">{nodeStatusText}</p>
             </div>
             <div className="snapshot-item">
-              <p className="snapshot-label">World Chain Sepolia</p>
+              <p className="snapshot-label">{worldChainVirtualConfig.chainName}</p>
               <p className="wallet-info">chain id: {worldChainVirtualConfig.chainId}</p>
               <p className="wallet-info small mono">
                 rpc: {worldChainVirtualConfig.rpcUrl || "thirdweb default rpc"}
@@ -1243,9 +1266,7 @@ export default function VerifyPage() {
               {!thirdwebConfigured ? (
                 <p className="config-warning">Set VITE_THIRDWEB_CLIENT_ID first.</p>
               ) : worldChainVirtualConfig.tokenAddresses.length === 0 ? (
-                <p className="config-warning">
-                  Set <code>VITE_WORLDCHAIN_VIRTUAL_TOKEN_ADDRESSES</code> to show ERC20 test token balances.
-                </p>
+                <p className="wallet-info small">No ERC20 virtual tokens configured.</p>
               ) : worldChainBalancesLoading ? (
                 <p className="wallet-info mono">Loading token balances...</p>
               ) : worldChainBalancesError ? (
@@ -1341,14 +1362,14 @@ export default function VerifyPage() {
             </p>
           )}
           <details className="manual-world-proof">
-            <summary>Manual proof JSON (simulator fallback)</summary>
+            <summary>Manual proof JSON (advanced debug input)</summary>
             <label>
               World ID Proof JSON
               <textarea
                 value={worldProofJson}
                 onChange={(event) => setWorldProofJson(event.target.value)}
                 rows={7}
-                placeholder='{"protocol_version":"4.0","action":"prediction_market_cre_demo","responses":[{"nullifier_hash":"0x...","proof":"0x...","verification_level":"device"}]}'
+                placeholder='{"protocol_version":"4.0","action":"your-action-id","responses":[{"nullifier_hash":"0x...","proof":"0x...","verification_level":"device"}]}'
               />
             </label>
             <div className="action-row">
@@ -1510,7 +1531,7 @@ export default function VerifyPage() {
             This list is reconstructed from on-chain node lifecycle events (activation/heartbeat).
           </p>
           {nodes.length === 0 ? (
-            <p>No registered nodes. Default mock 4 nodes will be used unless server requires registered nodes.</p>
+            <p>No registered nodes. Register and activate at least 3 healthy endpoint-backed nodes.</p>
           ) : (
             <div className="request-table">
               <div className="request-head">

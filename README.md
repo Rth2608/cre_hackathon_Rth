@@ -1,3 +1,6 @@
+DEPLOY_PROFILE=don bash scripts/redeploy_registry.sh
+
+
 # CRE Prediction Market Demo
 
 End-to-end demo for multi-DON style verification:

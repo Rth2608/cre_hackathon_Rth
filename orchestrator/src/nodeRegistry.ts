@@ -307,7 +307,7 @@ async function loadDb(): Promise<NodeDbSchema> {
           ? resolveNodeId(normalizedWalletAddress)
           : (item.nodeId ?? `node-${key.slice(0, 6)}`),
       selectedModelFamilies: selectedModelFamilies.length > 0 ? selectedModelFamilies : ["gpt"],
-      modelName: item.modelName ?? "mock-node",
+      modelName: item.modelName ?? "registered-node",
       endpointUrl,
       peerId: assertPeerId(item.peerId),
       tlsCertFingerprint: assertTlsFingerprint(item.tlsCertFingerprint),

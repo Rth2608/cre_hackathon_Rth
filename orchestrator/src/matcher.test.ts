@@ -48,7 +48,6 @@ describe("matcher endpoint filters", () => {
 
     const result = selectRuntimeNodesForRequest([withEndpoint, withoutEndpoint], {
       desiredNodes: 2,
-      allowDefaultNodes: false,
       requireEndpointUrl: true
     });
 
@@ -75,7 +74,6 @@ describe("matcher endpoint filters", () => {
 
     const result = selectRuntimeNodesForRequest([healthy, unhealthy], {
       desiredNodes: 2,
-      allowDefaultNodes: false,
       requireHealthyEndpoint: true
     });
 
@@ -106,7 +104,6 @@ describe("matcher endpoint filters", () => {
 
     const result = selectRuntimeNodesForRequest([fresh, stale], {
       desiredNodes: 2,
-      allowDefaultNodes: false,
       heartbeatTtlSeconds: 120
     });
 

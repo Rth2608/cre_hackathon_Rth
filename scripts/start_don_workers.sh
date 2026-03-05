@@ -15,41 +15,63 @@ if [[ -f "${PID_FILE}" ]]; then
   exit 1
 fi
 
-NODE_IDS=("gpt" "gemini" "claude" "grok")
-MODEL_NAMES=("operator-gpt" "operator-gemini" "operator-claude" "operator-grok")
+DEFAULT_NODE_IDS=("gpt" "gemini" "claude" "grok")
 BASE_PORT="${DON_WORKER_BASE_PORT:-19001}"
 if ! [[ "${BASE_PORT}" =~ ^[0-9]+$ ]]; then
   echo "[workers] DON_WORKER_BASE_PORT must be numeric: ${BASE_PORT}"
   exit 1
 fi
+
+IFS=',' read -r -a NODE_IDS <<< "${DON_WORKER_MODEL_FAMILIES:-gpt,gemini,claude,grok}"
+IFS=',' read -r -a OPERATORS <<< "${DON_WORKER_OPERATOR_ADDRESSES:-}"
+IFS=',' read -r -a PRIVATE_KEYS <<< "${DON_WORKER_PRIVATE_KEYS:-}"
+
+if [[ "${#OPERATORS[@]}" -lt 4 || "${#PRIVATE_KEYS[@]}" -lt 4 ]]; then
+  echo "[workers] DON_WORKER_OPERATOR_ADDRESSES and DON_WORKER_PRIVATE_KEYS must include 4 comma-separated values."
+  echo "[workers] example DON_WORKER_OPERATOR_ADDRESSES=0x...,0x...,0x...,0x..."
+  echo "[workers] example DON_WORKER_PRIVATE_KEYS=0x...,0x...,0x...,0x..."
+  exit 1
+fi
+
+if [[ "${#NODE_IDS[@]}" -lt 4 ]]; then
+  NODE_IDS=("${DEFAULT_NODE_IDS[@]}")
+fi
+NODE_IDS=("${NODE_IDS[@]:0:4}")
+OPERATORS=("${OPERATORS[@]:0:4}")
+PRIVATE_KEYS=("${PRIVATE_KEYS[@]:0:4}")
+
+MODEL_NAMES=()
+for family in "${NODE_IDS[@]}"; do
+  MODEL_NAMES+=("operator-${family}")
+done
+
 PORTS=(
   "${BASE_PORT}"
   "$((BASE_PORT + 1))"
   "$((BASE_PORT + 2))"
   "$((BASE_PORT + 3))"
 )
-OPERATORS=(
-  "0x9C7BC14e8a4B054e98C6DB99B9f1Ea2797BAee7B"
-  "0x2Efa1f0a487Ebbcbc28b64C56BBfb235Bc66C267"
-  "0xd816d4987b236C45C87B74c1964700fBb274B0E5"
-  "0xc43D2aaA148ba4d5f5341c9ad4799ddE85545D38"
-)
-PRIVATE_KEYS=(
-  "0x1000000000000000000000000000000000000000000000000000000000000001"
-  "0x2000000000000000000000000000000000000000000000000000000000000002"
-  "0x3000000000000000000000000000000000000000000000000000000000000003"
-  "0x4000000000000000000000000000000000000000000000000000000000000004"
-)
 
 echo -n "" > "${PID_FILE}"
 
 for i in "${!NODE_IDS[@]}"; do
-  node_id="${NODE_IDS[$i]}"
-  model_name="${MODEL_NAMES[$i]}"
+  node_id="$(echo "${NODE_IDS[$i]}" | xargs)"
+  model_name="$(echo "${MODEL_NAMES[$i]}" | xargs)"
   port="${PORTS[$i]}"
-  operator="${OPERATORS[$i]}"
-  private_key="${PRIVATE_KEYS[$i]}"
+  operator="$(echo "${OPERATORS[$i]}" | xargs)"
+  private_key="$(echo "${PRIVATE_KEYS[$i]}" | xargs)"
   log_path="${LOG_DIR}/${node_id}.log"
+
+  if ! [[ "${operator}" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+    echo "[workers] invalid operator address at index ${i}: ${operator}"
+    rm -f "${PID_FILE}"
+    exit 1
+  fi
+  if ! [[ "${private_key}" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
+    echo "[workers] invalid private key at index ${i}"
+    rm -f "${PID_FILE}"
+    exit 1
+  fi
 
   (
     cd "${ORCH_DIR}"

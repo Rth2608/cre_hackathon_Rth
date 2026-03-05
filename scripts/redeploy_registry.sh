@@ -6,12 +6,6 @@ CONTRACTS_DIR="$ROOT_DIR/contracts"
 DEFAULT_CONTRACTS_ENV="$CONTRACTS_DIR/.env"
 DEFAULT_ORCH_ENV="$ROOT_DIR/orchestrator/.env"
 DEAD_COORDINATOR_ADDRESS="0x000000000000000000000000000000000000dEaD"
-DEFAULT_DON_ALLOWLIST_OPERATORS=(
-  "0x9C7BC14e8a4B054e98C6DB99B9f1Ea2797BAee7B"
-  "0x2Efa1f0a487Ebbcbc28b64C56BBfb235Bc66C267"
-  "0xd816d4987b236C45C87B74c1964700fBb274B0E5"
-  "0xc43D2aaA148ba4d5f5341c9ad4799ddE85545D38"
-)
 
 CONTRACTS_ENV_FILE="${CONTRACTS_ENV_FILE:-$DEFAULT_CONTRACTS_ENV}"
 ORCHESTRATOR_ENV_FILE="${ORCHESTRATOR_ENV_FILE:-$DEFAULT_ORCH_ENV}"
@@ -119,8 +113,9 @@ build_don_allowlist_array() {
   out_ref=()
 
   if [[ -z "$raw" ]]; then
-    out_ref=("${DEFAULT_DON_ALLOWLIST_OPERATORS[@]}")
-    return
+    echo "DON_ALLOWLIST_OPERATORS is required when AUTO_ALLOW_DON_OPERATORS=true." >&2
+    echo "Example: DON_ALLOWLIST_OPERATORS=0x...,0x...,0x...,0x..." >&2
+    exit 1
   fi
 
   local normalized="${raw//$'\n'/,}"
@@ -163,11 +158,20 @@ deploy_contract_with_forge() {
 
   echo "[redeploy] deploying $deploy_label" >&2
   pushd "$CONTRACTS_DIR" >/dev/null
-  "${forge_cmd[@]}" | tee "$deploy_log" >&2
+  "${forge_cmd[@]}" 2>&1 | tee "$deploy_log" >&2
   popd >/dev/null
 
   local deployed_contract
   deployed_contract="$(sed -n -E 's/.*(Contract Address:|Deployed to:)[[:space:]]*(0x[0-9a-fA-F]{40}).*/\2/p' "$deploy_log" | tail -n1 | xargs)"
+
+  # Guard against false-positive "success" when forge failed to broadcast
+  # but old broadcast artifacts still exist on disk.
+  if [[ -z "$deployed_contract" ]] && grep -qE '^Error:' "$deploy_log"; then
+    echo "[redeploy] deployment failed while running forge script. Not using stale broadcast artifacts." >&2
+    sed -n '1,120p' "$deploy_log" >&2
+    rm -f "$deploy_log"
+    exit 1
+  fi
 
   if [[ -z "$deployed_contract" ]]; then
     local broadcast_script_dir
@@ -306,7 +310,7 @@ echo "Verify:"
 echo "  cast call $NEW_CONTRACT_ADDRESS \"owner()(address)\" --rpc-url \"\$RPC_URL\""
 echo "  cast call $NEW_CONTRACT_ADDRESS \"coordinator()(address)\" --rpc-url \"\$RPC_URL\""
 if [[ "$DEPLOY_PROFILE" == "don" ]]; then
-  echo "  cast call $NEW_CONTRACT_ADDRESS \"operatorAllowlist(address)(bool)\" ${DEFAULT_DON_ALLOWLIST_OPERATORS[0]} --rpc-url \"\$RPC_URL\""
+  echo "  cast call $NEW_CONTRACT_ADDRESS \"operatorAllowlist(address)(bool)\" <operator-address> --rpc-url \"\$RPC_URL\""
 fi
 echo
 echo "Reminder: orchestrator/.env 의 COORDINATOR_PRIVATE_KEY가 COORDINATOR_ADDRESS와 동일한 지갑인지 확인하세요."

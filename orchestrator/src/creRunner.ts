@@ -10,6 +10,7 @@ import type {
   OnchainReceipt,
   QuorumValidationResult,
   RegisteredNode,
+  RuntimeNode,
   RequestStatus,
   SignedNodeReport,
   VerificationPaymentReceipt,
@@ -18,15 +19,11 @@ import type {
 } from "./types";
 import { computeConsensus } from "./consensus";
 import { prepareConsensusBundleFromSignedReports } from "./donConsensus";
-import { buildSignedRuntimeReports } from "./donRuntime";
 import {
   computeReportsMerkleRoot,
-  signConsensusBundlePayloadByKey,
-  signOperatorBundleApprovalByKey,
   type DonEip712Domain
 } from "./donSignatures";
 import { collectConsensusBundleSignaturesViaEndpoints, runAllRuntimeNodesViaEndpoints } from "./endpointNodes";
-import { runAllRuntimeNodes, type RuntimeNode } from "./mockNodes";
 import { ensureDir, nowIso, resolveProjectPath, writeJsonFileAtomic } from "./utils";
 import { validateMarketRequest } from "./validator";
 
@@ -48,18 +45,84 @@ interface WorkflowParams {
   }) => Promise<OnchainReceipt>;
 }
 
+function splitCommandArgs(raw: string): string[] {
+  const matched = raw.match(/(?:[^\s"]+|"[^"]*")+/g) ?? [];
+  return matched
+    .map((token) => {
+      if (token.length >= 2 && token.startsWith("\"") && token.endsWith("\"")) {
+        return token.slice(1, -1);
+      }
+      return token;
+    })
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function hasFlag(args: string[], flag: string): boolean {
+  return args.some((arg) => arg === flag || arg.startsWith(`${flag}=`));
+}
+
+function normalizeLegacyCreArgs(args: string[]): string[] {
+  if (args.length >= 2 && args[0] === "workflow" && args[1] === "run") {
+    // CRE v1.2 removed `workflow run`; map legacy config to simulate mode.
+    return ["workflow", "simulate", ...args.slice(2)];
+  }
+  return args;
+}
+
+function resolveExternalCreTimeoutMs(): number {
+  const parsed = Number.parseInt(process.env.CRE_TIMEOUT_MS?.trim() ?? "", 10);
+  if (!Number.isInteger(parsed) || parsed < 1_000 || parsed > 300_000) {
+    return 30_000;
+  }
+  return parsed;
+}
+
+function buildExternalCreArgs(requestArtifactPath: string): string[] {
+  const rawArgs = process.env.CRE_ARGS?.trim() || "workflow simulate";
+  let args = normalizeLegacyCreArgs(splitCommandArgs(rawArgs));
+  if (args.length === 0) {
+    args = ["workflow", "simulate"];
+  }
+
+  const isWorkflowSimulate = args[0] === "workflow" && args[1] === "simulate";
+  if (!isWorkflowSimulate) {
+    return args;
+  }
+
+  const hasWorkflowFolderPath = args.slice(2).some((arg) => !arg.startsWith("-"));
+  if (!hasWorkflowFolderPath) {
+    const workflowPath = process.env.CRE_WORKFLOW_PATH?.trim() || ".";
+    args.splice(2, 0, workflowPath);
+  }
+
+  if (!hasFlag(args, "--http-payload")) {
+    args.push("--http-payload", requestArtifactPath);
+  }
+
+  if (!hasFlag(args, "--non-interactive")) {
+    args.push("--non-interactive");
+  }
+
+  const triggerIndex = process.env.CRE_TRIGGER_INDEX?.trim() || "0";
+  if (/^\d+$/.test(triggerIndex) && !hasFlag(args, "--trigger-index")) {
+    args.push("--trigger-index", triggerIndex);
+  }
+
+  return args;
+}
+
 async function runExternalCre(requestArtifactPath: string): Promise<WorkflowRunResult["externalCreOutput"] | undefined> {
   if (process.env.CRE_CLI_ENABLED !== "true") {
     return undefined;
   }
 
   const command = process.env.CRE_COMMAND?.trim() || "cre";
-  const argString = process.env.CRE_ARGS?.trim() || "workflow run";
-  const args = argString.split(/\s+/).filter(Boolean);
-  args.push("--input", requestArtifactPath);
+  const args = buildExternalCreArgs(requestArtifactPath);
+  const timeoutMs = resolveExternalCreTimeoutMs();
 
   const { stdout, stderr } = await execFileAsync(command, args, {
-    timeout: 30_000
+    timeout: timeoutMs
   });
 
   return {
@@ -125,10 +188,6 @@ function resolveEndpointDispatchPath(): string {
   const raw = process.env.NODE_ENDPOINT_VERIFY_PATH?.trim();
   if (!raw) return "/verify";
   return raw.startsWith("/") ? raw : `/${raw}`;
-}
-
-function resolveEndpointDispatchFallback(): boolean {
-  return process.env.NODE_ENDPOINT_VERIFY_FALLBACK_MOCK === "true";
 }
 
 function parseBooleanEnv(value: string | undefined, fallback: boolean): boolean {
@@ -219,13 +278,13 @@ export async function runCreWorkflow(params: WorkflowParams): Promise<WorkflowRu
   const useEndpointDispatch = resolveEndpointDispatchEnabled();
   const endpointDispatchTimeoutMs = resolveEndpointDispatchTimeoutMs();
   const endpointDispatchPath = resolveEndpointDispatchPath();
-  const endpointDispatchFallback = resolveEndpointDispatchFallback();
+  if (!useEndpointDispatch) {
+    throw new Error("NODE_ENDPOINT_VERIFY_ENABLED=true is required. Local runtime dispatch has been removed.");
+  }
   const endpointRequireSignedReports = resolveEndpointRequireSignedReports(useDonSignedReports, useEndpointDispatch);
   const endpointBundleSigningEnabled = resolveEndpointBundleSigning(useDonSignedReports, useEndpointDispatch);
   const endpointBundleApprovalPath = resolveEndpointBundleApprovalPath();
   const endpointLeaderSignPath = resolveEndpointLeaderSignPath();
-  const signerKeyByOperator: Record<string, string> = {};
-  let donDomain: DonEip712Domain | undefined;
   let donRound = 1;
   let requestHash = "";
   let promptTemplateHash = "";
@@ -250,57 +309,30 @@ export async function runCreWorkflow(params: WorkflowParams): Promise<WorkflowRu
   });
 
   await runStep("dispatch_nodes", stepLogs, async () => {
-    const dispatchResult = useEndpointDispatch
-      ? await runAllRuntimeNodesViaEndpoints({
-          requestId,
-          input: validatedInput,
-          runtimeNodes,
-          activeNodes: params.activeNodes,
-          timeoutMs: endpointDispatchTimeoutMs,
-          verifyPath: endpointDispatchPath,
-          fallbackToMock: endpointDispatchFallback,
-          requireSignedReports: endpointRequireSignedReports
-        })
-      : {
-          ...(await runAllRuntimeNodes(requestId, validatedInput, runtimeNodes)),
-          signedReports: [],
-          executionReceipts: []
-        };
+    const dispatchResult = await runAllRuntimeNodesViaEndpoints({
+      requestId,
+      input: validatedInput,
+      runtimeNodes,
+      activeNodes: params.activeNodes,
+      timeoutMs: endpointDispatchTimeoutMs,
+      verifyPath: endpointDispatchPath,
+      requireSignedReports: endpointRequireSignedReports
+    });
     nodeReports = dispatchResult.reports;
     nodeFailures = dispatchResult.failures;
 
     if (useDonSignedReports) {
-      if (useEndpointDispatch) {
-        signedNodeReports = dispatchResult.signedReports ?? [];
-        executionReceipts = dispatchResult.executionReceipts ?? [];
-        donRound = resolveDonRoundFromEnv();
-        requestHash = buildRequestHash(validatedInput);
-        promptTemplateHash = resolvePromptTemplateHashFromEnv();
-        attestationRootHash =
-          executionReceipts.length > 0
-            ? computeReportsMerkleRoot(executionReceipts.map((receipt) => receipt.confidentialAttestationHash))
-            : ZeroHash;
-        if (endpointRequireSignedReports) {
-          if (signedNodeReports.length !== nodeReports.length || executionReceipts.length !== nodeReports.length) {
-            throw new Error("signed_artifacts_missing_for_some_reports");
-          }
+      signedNodeReports = dispatchResult.signedReports ?? [];
+      executionReceipts = dispatchResult.executionReceipts ?? [];
+      donRound = resolveDonRoundFromEnv();
+      requestHash = buildRequestHash(validatedInput);
+      promptTemplateHash = resolvePromptTemplateHashFromEnv();
+      attestationRootHash =
+        executionReceipts.length > 0 ? computeReportsMerkleRoot(executionReceipts.map((receipt) => receipt.confidentialAttestationHash)) : ZeroHash;
+      if (endpointRequireSignedReports) {
+        if (signedNodeReports.length !== nodeReports.length || executionReceipts.length !== nodeReports.length) {
+          throw new Error("signed_artifacts_missing_for_some_reports");
         }
-      } else {
-        const signed = await buildSignedRuntimeReports({
-          requestId,
-          input: validatedInput,
-          nodeReports,
-          runtimeNodes
-        });
-        signedNodeReports = signed.signedReports;
-        executionReceipts = signed.executionReceipts;
-        nodeFailures = [...nodeFailures, ...signed.failures];
-        Object.assign(signerKeyByOperator, signed.signerKeyByOperator);
-        donDomain = signed.domain;
-        donRound = signed.round;
-        requestHash = signed.requestHash;
-        promptTemplateHash = signed.promptTemplateHash;
-        attestationRootHash = signed.attestationRootHash;
       }
     }
   });
@@ -321,17 +353,28 @@ export async function runCreWorkflow(params: WorkflowParams): Promise<WorkflowRu
 
   await runStep("compute_consensus", stepLogs, async () => {
     if (useDonSignedReports) {
-      const activeDomain: DonEip712Domain = donDomain ?? {
-        name: "CRE-DON-Consensus",
-        version: "1",
-        chainId: Number.parseInt(process.env.CHAIN_ID ?? "1", 10) || 1,
-        verifyingContract: process.env.CONTRACT_ADDRESS || "0x0000000000000000000000000000000000000001"
+      const chainId = Number.parseInt(process.env.CHAIN_ID ?? "", 10);
+      const verifyingContract = process.env.DON_VERIFIER_CONTRACT?.trim() || process.env.CONTRACT_ADDRESS?.trim();
+      if (!Number.isInteger(chainId) || chainId <= 0) {
+        throw new Error("CHAIN_ID must be set to a positive integer when USE_DON_SIGNED_REPORTS=true");
+      }
+      if (!verifyingContract) {
+        throw new Error("DON_VERIFIER_CONTRACT or CONTRACT_ADDRESS is required when USE_DON_SIGNED_REPORTS=true");
+      }
+
+      const activeDomain: DonEip712Domain = {
+        name: process.env.DON_DOMAIN_NAME?.trim() || "CRE-DON-Consensus",
+        version: process.env.DON_DOMAIN_VERSION?.trim() || "1",
+        chainId,
+        verifyingContract
       };
       const provisionalLeader =
         process.env.DON_LEADER_OPERATOR?.trim() ||
         signedNodeReports[0]?.payload.operator ||
-        runtimeNodes[0]?.operatorAddress ||
-        "0x0000000000000000000000000000000000000001";
+        runtimeNodes[0]?.operatorAddress;
+      if (!provisionalLeader) {
+        throw new Error("unable to determine DON leader operator from reports or runtime nodes");
+      }
 
       const prepared = prepareConsensusBundleFromSignedReports({
         requestId,
@@ -355,71 +398,25 @@ export async function runCreWorkflow(params: WorkflowParams): Promise<WorkflowRu
 
       if (prepared.bundle) {
         const includedOperators = prepared.bundle.includedOperators.map((operator) => operator.toLowerCase());
-        if (useEndpointDispatch && endpointBundleSigningEnabled) {
-          const selectedLeader = process.env.DON_LEADER_OPERATOR?.trim();
-          if (selectedLeader && !includedOperators.includes(selectedLeader.toLowerCase())) {
-            throw new Error(`DON_LEADER_OPERATOR is not part of included operators: ${selectedLeader}`);
-          }
-
-          consensusBundle = await collectConsensusBundleSignaturesViaEndpoints({
-            bundle: prepared.bundle,
-            activeNodes: params.activeNodes,
-            timeoutMs: endpointDispatchTimeoutMs,
-            bundleApprovalPath: endpointBundleApprovalPath,
-            leaderSignPath: endpointLeaderSignPath,
-            leaderOperator: selectedLeader
-          });
-        } else {
-          const leaderPrivateKeyOverride = process.env.DON_LEADER_PRIVATE_KEY?.trim();
-          const selectedLeader = process.env.DON_LEADER_OPERATOR?.trim().toLowerCase();
-
-          if (selectedLeader && !includedOperators.includes(selectedLeader)) {
-            throw new Error(`DON_LEADER_OPERATOR is not part of included operators: ${selectedLeader}`);
-          }
-
-          let leaderPrivateKey: string | undefined;
-          if (leaderPrivateKeyOverride) {
-            leaderPrivateKey = leaderPrivateKeyOverride;
-          } else if (selectedLeader && signerKeyByOperator[selectedLeader]) {
-            leaderPrivateKey = signerKeyByOperator[selectedLeader];
-          } else {
-            const firstOperatorWithKey = includedOperators.find((operator) => signerKeyByOperator[operator]);
-            if (!firstOperatorWithKey) {
-              throw new Error("no leader private key found for included operators");
-            }
-            leaderPrivateKey = signerKeyByOperator[firstOperatorWithKey];
-          }
-
-          const leaderSigned = await signConsensusBundlePayloadByKey(activeDomain, prepared.bundle.payload, leaderPrivateKey);
-          const approvalSignatures: string[] = [];
-
-          for (const operator of includedOperators) {
-            const operatorKey = signerKeyByOperator[operator];
-            if (!operatorKey) {
-              throw new Error(`missing operator private key for bundle approval: ${operator}`);
-            }
-            const approval = await signOperatorBundleApprovalByKey(
-              activeDomain,
-              {
-                bundleHash: prepared.bundle.bundleHash,
-                requestId: prepared.bundle.payload.requestId,
-                round: prepared.bundle.payload.round
-              },
-              operatorKey
-            );
-            if (approval.operator.toLowerCase() !== operator) {
-              throw new Error(`operator approval signer mismatch for ${operator}`);
-            }
-            approvalSignatures.push(approval.signature);
-          }
-
-          consensusBundle = {
-            ...prepared.bundle,
-            leader: leaderSigned.leader,
-            leaderSignature: leaderSigned.leaderSignature,
-            reportSignatures: approvalSignatures
-          };
+        if (!endpointBundleSigningEnabled) {
+          throw new Error(
+            "DON_ENDPOINT_BUNDLE_SIGNING_ENABLED=true is required. Local/private-key bundle signing path has been removed."
+          );
         }
+
+        const selectedLeader = process.env.DON_LEADER_OPERATOR?.trim();
+        if (selectedLeader && !includedOperators.includes(selectedLeader.toLowerCase())) {
+          throw new Error(`DON_LEADER_OPERATOR is not part of included operators: ${selectedLeader}`);
+        }
+
+        consensusBundle = await collectConsensusBundleSignaturesViaEndpoints({
+          bundle: prepared.bundle,
+          activeNodes: params.activeNodes,
+          timeoutMs: endpointDispatchTimeoutMs,
+          bundleApprovalPath: endpointBundleApprovalPath,
+          leaderSignPath: endpointLeaderSignPath,
+          leaderOperator: selectedLeader
+        });
       } else {
         consensusBundle = undefined;
       }

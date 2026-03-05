@@ -1,13 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import type { MarketRequestInput, RegisteredNode } from "./types";
+import type { MarketRequestInput, RegisteredNode, RuntimeNode } from "./types";
 import { runAllRuntimeNodesViaEndpoints } from "./endpointNodes";
-import type { RuntimeNode } from "./mockNodes";
 
 function sampleInput(): MarketRequestInput {
   return {
     question: "Will BTC close above 100k by 2026-12-31 UTC?",
-    description: "demo",
-    sourceUrls: ["https://www.reuters.com/world/us/example"],
+    description: "test request",
+    sourceUrls: ["https://www.reuters.com/world/us/test-case"],
     resolutionCriteria: "Reuters close report",
     submitterAddress: "0x1111111111111111111111111111111111111111"
   };
@@ -81,7 +80,7 @@ describe("endpoint node dispatch", () => {
         ],
         timeoutMs: 2000,
         verifyPath: "/verify",
-        fallbackToMock: false
+        requireSignedReports: false
       });
 
       expect(result.failures.length).toBe(0);
@@ -99,7 +98,7 @@ describe("endpoint node dispatch", () => {
       nodeId: "0xdddddddddddddddddddddddddddddddddddddddd",
       modelFamily: "grok",
       modelName: "remote-grok",
-      operatorAddress: "0xd816d4987b236C45C87B74c1964700fBb274B0E5"
+      operatorAddress: "0xdddddddddddddddddddddddddddddddddddddddd"
     };
     const requestId = "0x89fc08aae4939f45486abcb2bb6917d08b42e4f7faa5902f78a9f0417eccf008";
     const reportHash = "0x1111111111111111111111111111111111111111111111111111111111111111";
@@ -177,7 +176,6 @@ describe("endpoint node dispatch", () => {
         ],
         timeoutMs: 2000,
         verifyPath: "/verify",
-        fallbackToMock: false,
         requireSignedReports: true
       });
 
@@ -205,35 +203,11 @@ describe("endpoint node dispatch", () => {
       runtimeNodes: [runtimeNode],
       activeNodes: [],
       timeoutMs: 2000,
-      verifyPath: "/verify",
-      fallbackToMock: false
+      verifyPath: "/verify"
     });
 
     expect(result.reports.length).toBe(0);
     expect(result.failures.length).toBe(1);
     expect(result.failures[0]?.reason).toBe("endpoint_missing");
-  });
-
-  test("falls back to mock when endpoint is missing and fallback is enabled", async () => {
-    const runtimeNode: RuntimeNode = {
-      nodeId: "0xcccccccccccccccccccccccccccccccccccccccc",
-      modelFamily: "claude",
-      modelName: "remote-claude",
-      operatorAddress: "0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC"
-    };
-
-    const result = await runAllRuntimeNodesViaEndpoints({
-      requestId: "0x89fc08aae4939f45486abcb2bb6917d08b42e4f7faa5902f78a9f0417eccf008",
-      input: sampleInput(),
-      runtimeNodes: [runtimeNode],
-      activeNodes: [],
-      timeoutMs: 2000,
-      verifyPath: "/verify",
-      fallbackToMock: true
-    });
-
-    expect(result.failures.length).toBe(0);
-    expect(result.reports.length).toBe(1);
-    expect(result.reports[0]?.nodeId).toBe(runtimeNode.nodeId);
   });
 });

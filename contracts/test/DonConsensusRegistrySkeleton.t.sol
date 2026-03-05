@@ -25,10 +25,8 @@ contract DonConsensusRegistrySkeletonTest {
         keccak256("OperatorApproval(bytes32 bundleHash,bytes32 requestId,uint32 round)");
     bytes32 private constant NAME_HASH = keccak256(bytes("CRE-DON-Consensus"));
     bytes32 private constant VERSION_HASH = keccak256(bytes("1"));
-
-    uint256 private constant LEADER_PK = 0x1000000000000000000000000000000000000000000000000000000000000001;
-    uint256 private constant OPERATOR2_PK = 0x2000000000000000000000000000000000000000000000000000000000000002;
-    uint256 private constant OPERATOR3_PK = 0x3000000000000000000000000000000000000000000000000000000000000003;
+    uint256 private constant SECP256K1_N =
+        0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
 
     address private coordinator = address(0xCAFE);
     bytes32 private requestId = keccak256("request-don-1");
@@ -41,6 +39,23 @@ contract DonConsensusRegistrySkeletonTest {
     bytes32 private attestationRootHash = keccak256("attestation-root");
     bytes32 private promptTemplateHash = keccak256("prompt-template");
     uint64 private consensusTimestamp = 1_735_689_600;
+
+    function _testPrivateKey(string memory label) private pure returns (uint256) {
+        uint256 raw = uint256(keccak256(abi.encodePacked("cre-don-test-key:", label)));
+        return (raw % (SECP256K1_N - 1)) + 1;
+    }
+
+    function _leaderPrivateKey() private pure returns (uint256) {
+        return _testPrivateKey("leader");
+    }
+
+    function _operator2PrivateKey() private pure returns (uint256) {
+        return _testPrivateKey("operator2");
+    }
+
+    function _operator3PrivateKey() private pure returns (uint256) {
+        return _testPrivateKey("operator3");
+    }
 
     function testOnlyCoordinatorCanFinalizeWithBundle() external {
         DonConsensusRegistrySkeleton registry = new DonConsensusRegistrySkeleton(coordinator);
@@ -110,7 +125,7 @@ contract DonConsensusRegistrySkeletonTest {
         VM.expectRevert(abi.encodeWithSelector(DonConsensusRegistrySkeleton.UnauthorizedCoordinator.selector));
         registry.recordNodeLifecycle(
             lifecycleId,
-            VM.addr(LEADER_PK),
+            VM.addr(_leaderPrivateKey()),
             1,
             keccak256("endpoint"),
             keccak256("payload"),
@@ -124,7 +139,7 @@ contract DonConsensusRegistrySkeletonTest {
         bytes32 lifecycleId = keccak256("don-lifecycle-2");
         bytes32 endpointHash = keccak256("endpoint");
         bytes32 payloadHash = keccak256("payload");
-        address nodeId = VM.addr(LEADER_PK);
+        address nodeId = VM.addr(_leaderPrivateKey());
 
         VM.prank(coordinator);
         registry.recordNodeLifecycle(
@@ -172,9 +187,9 @@ contract DonConsensusRegistrySkeletonTest {
     }
 
     function _allowOperators(DonConsensusRegistrySkeleton registry) private {
-        address leader = VM.addr(LEADER_PK);
-        address operator2 = VM.addr(OPERATOR2_PK);
-        address operator3 = VM.addr(OPERATOR3_PK);
+        address leader = VM.addr(_leaderPrivateKey());
+        address operator2 = VM.addr(_operator2PrivateKey());
+        address operator3 = VM.addr(_operator3PrivateKey());
         registry.setOperatorPermission(leader, true);
         registry.setOperatorPermission(operator2, true);
         registry.setOperatorPermission(operator3, true);
@@ -190,9 +205,13 @@ contract DonConsensusRegistrySkeletonTest {
             bytes32 bundleHash
         )
     {
-        leader = VM.addr(LEADER_PK);
-        address operator2 = VM.addr(OPERATOR2_PK);
-        address operator3 = VM.addr(OPERATOR3_PK);
+        uint256 leaderPk = _leaderPrivateKey();
+        uint256 operator2Pk = _operator2PrivateKey();
+        uint256 operator3Pk = _operator3PrivateKey();
+
+        leader = VM.addr(leaderPk);
+        address operator2 = VM.addr(operator2Pk);
+        address operator3 = VM.addr(operator3Pk);
         operators = new address[](3);
         operators[0] = leader;
         operators[1] = operator2;
@@ -219,15 +238,15 @@ contract DonConsensusRegistrySkeletonTest {
         );
 
         bytes32 leaderDigest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, bundleHash));
-        leaderSignature = _signDigest(LEADER_PK, leaderDigest);
+        leaderSignature = _signDigest(leaderPk, leaderDigest);
 
         bytes32 operatorApprovalStructHash = keccak256(abi.encode(OPERATOR_APPROVAL_TYPEHASH, bundleHash, requestId, round));
         bytes32 operatorApprovalDigest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, operatorApprovalStructHash));
 
         operatorSignatures = new bytes[](3);
-        operatorSignatures[0] = _signDigest(LEADER_PK, operatorApprovalDigest);
-        operatorSignatures[1] = _signDigest(OPERATOR2_PK, operatorApprovalDigest);
-        operatorSignatures[2] = _signDigest(OPERATOR3_PK, operatorApprovalDigest);
+        operatorSignatures[0] = _signDigest(leaderPk, operatorApprovalDigest);
+        operatorSignatures[1] = _signDigest(operator2Pk, operatorApprovalDigest);
+        operatorSignatures[2] = _signDigest(operator3Pk, operatorApprovalDigest);
     }
 
     function _signDigest(uint256 privateKey, bytes32 digest) private returns (bytes memory signature) {

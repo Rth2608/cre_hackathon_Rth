@@ -1,41 +1,6 @@
 import { createHash } from "node:crypto";
-import type { CanonicalModelFamily, MarketRequestInput, NodeId, NodeReport, NodeVerdict } from "./types";
+import type { CanonicalModelFamily, MarketRequestInput, NodeReport, NodeVerdict, RuntimeNode } from "./types";
 import { hashObject } from "./utils";
-import { DEFAULT_DON_OPERATOR_ADDRESS_BY_NODE_ID } from "./donOperatorKeys";
-
-export interface RuntimeNode {
-  nodeId: NodeId;
-  modelFamily: CanonicalModelFamily;
-  modelName: string;
-  operatorAddress: string;
-}
-
-export const DEFAULT_RUNTIME_NODES: RuntimeNode[] = [
-  {
-    nodeId: "gpt",
-    modelFamily: "gpt",
-    modelName: "mock-gpt",
-    operatorAddress: DEFAULT_DON_OPERATOR_ADDRESS_BY_NODE_ID.gpt ?? "0x1111111111111111111111111111111111111111"
-  },
-  {
-    nodeId: "gemini",
-    modelFamily: "gemini",
-    modelName: "mock-gemini",
-    operatorAddress: DEFAULT_DON_OPERATOR_ADDRESS_BY_NODE_ID.gemini ?? "0x2222222222222222222222222222222222222222"
-  },
-  {
-    nodeId: "claude",
-    modelFamily: "claude",
-    modelName: "mock-claude",
-    operatorAddress: DEFAULT_DON_OPERATOR_ADDRESS_BY_NODE_ID.claude ?? "0x3333333333333333333333333333333333333333"
-  },
-  {
-    nodeId: "grok",
-    modelFamily: "grok",
-    modelName: "mock-grok",
-    operatorAddress: DEFAULT_DON_OPERATOR_ADDRESS_BY_NODE_ID.grok ?? "0x4444444444444444444444444444444444444444"
-  }
-];
 
 const NODE_LABELS: Record<CanonicalModelFamily, string> = {
   gpt: "GPT Node",
@@ -83,37 +48,8 @@ function deriveEvidenceSummary(input: MarketRequestInput): string {
 }
 
 function deterministicTimestamp(seedHex: string): string {
-  const base = Date.UTC(2025, 0, 1, 0, 0, 0);
-  const offset = Number.parseInt(seedHex.slice(12, 20), 16) % (30 * 24 * 3600);
-  return new Date(base + offset * 1000).toISOString();
-}
-
-function deterministicLatency(seedHex: string): number {
-  return 120 + (Number.parseInt(seedHex.slice(20, 24), 16) % 380);
-}
-
-function shouldFailNode(nodeId: NodeId): boolean {
-  const raw = process.env.MOCK_FAIL_NODES ?? "";
-  const failures = raw
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
-
-  return failures.includes(nodeId);
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-export async function runMockNode(requestId: string, input: MarketRequestInput, nodeId: NodeId): Promise<NodeReport> {
-  const runtimeNode = DEFAULT_RUNTIME_NODES.find((node) => node.nodeId === nodeId) ?? {
-    nodeId,
-    modelFamily: "gpt",
-    modelName: "mock-custom",
-    operatorAddress: "0x0000000000000000000000000000000000000000"
-  };
-  return runRuntimeNode(requestId, input, runtimeNode);
+  const offset = Number.parseInt(seedHex.slice(12, 20), 16) % 10;
+  return new Date(Date.now() - offset * 1000).toISOString();
 }
 
 export async function runRuntimeNode(
@@ -121,17 +57,7 @@ export async function runRuntimeNode(
   input: MarketRequestInput,
   runtimeNode: RuntimeNode
 ): Promise<NodeReport> {
-  if (shouldFailNode(runtimeNode.nodeId)) {
-    throw new Error(`${runtimeNode.nodeId} simulated failure`);
-  }
-
   const seedHex = digestHex(requestId, runtimeNode, input);
-  const latencyMs = deterministicLatency(seedHex);
-
-  if (process.env.MOCK_DISABLE_LATENCY !== "true") {
-    await sleep(latencyMs);
-  }
-
   const confidence = deriveConfidence(seedHex);
   const verdict = deriveVerdict(seedHex, runtimeNode.modelFamily);
   const nodeLabel = NODE_LABELS[runtimeNode.modelFamily] ?? "Model Node";
@@ -157,22 +83,21 @@ export async function runRuntimeNode(
   };
 }
 
-export async function runAllMockNodes(requestId: string, input: MarketRequestInput): Promise<{
-  reports: NodeReport[];
-  failures: Array<{ nodeId: NodeId; reason: string }>;
-}> {
-  return runAllRuntimeNodes(requestId, input, DEFAULT_RUNTIME_NODES);
-}
-
 export async function runAllRuntimeNodes(
   requestId: string,
   input: MarketRequestInput,
   runtimeNodes: RuntimeNode[]
 ): Promise<{
   reports: NodeReport[];
-  failures: Array<{ nodeId: NodeId; reason: string }>;
+  failures: Array<{ nodeId: string; reason: string }>;
 }> {
-  const nodes = runtimeNodes.length > 0 ? runtimeNodes : DEFAULT_RUNTIME_NODES;
+  const nodes = runtimeNodes;
+  if (nodes.length === 0) {
+    return {
+      reports: [],
+      failures: []
+    };
+  }
 
   const settled = await Promise.allSettled(
     nodes.map(async (node) => ({
@@ -182,7 +107,7 @@ export async function runAllRuntimeNodes(
   );
 
   const reports: NodeReport[] = [];
-  const failures: Array<{ nodeId: NodeId; reason: string }> = [];
+  const failures: Array<{ nodeId: string; reason: string }> = [];
 
   settled.forEach((result, index) => {
     const nodeId = nodes[index]?.nodeId ?? `unknown-${index}`;

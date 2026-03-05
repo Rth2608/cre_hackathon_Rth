@@ -32,7 +32,8 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
       "Content-Type": "application/json; charset=utf-8",
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, X-Wallet-Address, X-Payment, Payment-Signature",
+      "Access-Control-Allow-Headers":
+        "Content-Type, X-Wallet-Address, X-Payment, Payment-Signature, X-World-ID-Token, X-Wallet-Auth-Signature, X-Wallet-Auth-Timestamp",
       ...headers
     }
   });

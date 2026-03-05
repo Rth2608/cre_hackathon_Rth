@@ -7,12 +7,13 @@ import {
   toNodeReportTypedDataValue,
   toOperatorApprovalTypedDataValue
 } from "./donSignatures";
-import { runRuntimeNode, type RuntimeNode } from "./mockNodes";
+import { runRuntimeNode } from "./runtimeNodes";
 import type {
   CanonicalModelFamily,
   ConsensusBundlePayload,
   ExecutionReceipt,
   MarketRequestInput,
+  RuntimeNode,
   SignedNodeReportPayload
 } from "./types";
 import { hashObject, nowIso } from "./utils";
@@ -110,10 +111,10 @@ function buildDonDomainFromEnv() {
     throw new Error("CHAIN_ID must be a positive integer");
   }
 
-  const verifyingContract =
-    process.env.DON_VERIFIER_CONTRACT?.trim() ||
-    process.env.CONTRACT_ADDRESS?.trim() ||
-    "0x0000000000000000000000000000000000000001";
+  const verifyingContract = process.env.DON_VERIFIER_CONTRACT?.trim() || process.env.CONTRACT_ADDRESS?.trim();
+  if (!verifyingContract) {
+    throw new Error("DON_VERIFIER_CONTRACT or CONTRACT_ADDRESS is required");
+  }
 
   return buildDonDomain({
     name: process.env.DON_DOMAIN_NAME?.trim() || "CRE-DON-Consensus",
