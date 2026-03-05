@@ -1723,11 +1723,22 @@ async function router(req: Request): Promise<Response> {
   }
 
   if (req.method === "GET" && pathname === "/api/por/status") {
-    const status = await getPorStatusSnapshot();
-    return jsonResponse({
-      ok: true,
-      data: status
-    });
+    try {
+      const status = await getPorStatusSnapshot();
+      return jsonResponse({
+        ok: true,
+        data: status
+      });
+    } catch (error) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: "por_status_unavailable",
+          detail: stringifyError(error)
+        },
+        503
+      );
+    }
   }
 
   if (req.method === "GET" && pathname === "/api/nodes") {
@@ -1786,7 +1797,27 @@ assertStartupConfigOrThrow();
 
 Bun.serve({
   port: PORT,
-  fetch: router
+  fetch: async (req: Request) => {
+    try {
+      return await router(req);
+    } catch (error) {
+      const url = new URL(req.url);
+      const detail = stringifyError(error);
+      logServerFailure("http.unhandled_exception", {
+        method: req.method,
+        path: url.pathname,
+        error: detail
+      });
+      return jsonResponse(
+        {
+          ok: false,
+          error: "internal_server_error",
+          detail
+        },
+        500
+      );
+    }
+  }
 });
 
 logServerEvent("info", "startup.server.listening", {
