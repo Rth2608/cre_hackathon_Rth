@@ -12,6 +12,13 @@ function scoreLabel(score?: number): string {
   return `${(score * 100).toFixed(2)}%`;
 }
 
+function formatRequestId(value: string | undefined): string {
+  if (!value) {
+    return "-";
+  }
+  return value;
+}
+
 export default function ResultPage() {
   const { requestId } = useParams();
   const activeAccount = useActiveAccount();
@@ -160,7 +167,8 @@ export default function ResultPage() {
         <AppNav current="result" />
         <header className="hero compact">
           <p className="eyebrow">Verification Result</p>
-          <h1>Request {requestId}</h1>
+          <h1>Request</h1>
+          <p className="wallet-info mono request-id-hero">{formatRequestId(requestId)}</p>
           <div className="wallet-row">
             {thirdwebConfigured ? (
               <ConnectButton

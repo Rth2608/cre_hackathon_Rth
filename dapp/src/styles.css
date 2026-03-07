@@ -22,6 +22,8 @@ html,
 body,
 #root {
   min-height: 100%;
+  width: 100%;
+  overflow-x: hidden;
 }
 
 body {
@@ -52,6 +54,9 @@ body::before {
   z-index: 1;
   display: flex;
   justify-content: center;
+  width: 100%;
+  max-width: 100vw;
+  overflow-x: clip;
   padding:
     max(0.8rem, env(safe-area-inset-top))
     max(0.7rem, env(safe-area-inset-right))
@@ -61,6 +66,7 @@ body::before {
 
 .panel {
   width: min(720px, 100%);
+  max-width: 100%;
   background: linear-gradient(180deg, rgba(17, 30, 54, 0.92), rgba(10, 18, 33, 0.82));
   border: 1px solid var(--line);
   border-radius: 18px;
@@ -80,6 +86,10 @@ body::before {
   background: linear-gradient(90deg, transparent, var(--accent), var(--accent-2), transparent);
   opacity: 0.9;
   margin-bottom: 0.95rem;
+}
+
+.panel > * {
+  min-width: 0;
 }
 
 .top-nav {
@@ -139,6 +149,8 @@ body::before {
   margin: 0;
   font-size: clamp(1.45rem, 3.15vw, 2.2rem);
   line-height: 1.1;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .hero p {
@@ -193,10 +205,21 @@ body::before {
   flex-wrap: wrap;
 }
 
+.wallet-row > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .wallet-info {
   margin: 0;
   font-size: 0.77rem;
   color: #9ec1ea;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.request-id-hero {
+  font-size: 0.8rem;
 }
 
 .config-warning {
@@ -300,6 +323,13 @@ button {
   cursor: pointer;
   box-shadow: 0 10px 22px rgba(8, 17, 34, 0.48);
   transition: transform 110ms ease, box-shadow 110ms ease, filter 110ms ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1.2;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 button:hover {
@@ -309,7 +339,7 @@ button:hover {
 }
 
 button.secondary {
-  color: #c6d7ef;
+  color: #e8f1ff;
   background: linear-gradient(180deg, rgba(29, 45, 72, 0.96), rgba(18, 31, 53, 0.96));
   border: 1px solid rgba(96, 130, 172, 0.48);
 }
@@ -344,6 +374,8 @@ button:disabled {
   border: 1px solid var(--line-soft);
   background: linear-gradient(180deg, rgba(18, 31, 53, 0.8), rgba(10, 17, 32, 0.86));
   padding: 0.9rem;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .status-card h2,
@@ -354,6 +386,8 @@ button:disabled {
 .status-card p {
   margin: 0.42rem 0;
   color: var(--text-dim);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .status-card strong {
@@ -577,6 +611,12 @@ button:disabled {
   padding: 0.56rem 0.62rem;
 }
 
+.request-row > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .por-head,
 .por-row {
   grid-template-columns: 0.6fr 0.9fr 1.1fr 1.1fr 2.4fr;
@@ -644,6 +684,8 @@ button:disabled {
   color: #6ee8ff;
   font-weight: 700;
   text-decoration: none;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .text-link:hover {
@@ -700,6 +742,10 @@ button:disabled {
 
   .family-grid {
     grid-template-columns: 1fr;
+  }
+
+  .wallet-row .wallet-info {
+    flex: 1 1 100%;
   }
 }
 
