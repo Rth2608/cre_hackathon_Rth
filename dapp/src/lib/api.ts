@@ -298,13 +298,11 @@ async function signWithMiniKitFallback(input: {
     throw new Error(`minikit_sign_failed: ${detail}`);
   }
   const signature = typeof payload.signature === "string" ? payload.signature.trim() : "";
-  const signerAddress = typeof payload.address === "string" ? payload.address.trim().toLowerCase() : "";
   if (!signature) {
     throw new Error("minikit_sign_failed: empty_signature");
   }
-  if (signerAddress && signerAddress !== input.walletAddress.trim().toLowerCase()) {
-    throw new Error("minikit_sign_failed: signer_wallet_mismatch");
-  }
+  // World App payload shape can vary (EOA, smart wallet, or CAIP-like identifiers).
+  // Let backend signature verification be the source of truth for wallet binding.
   return signature;
 }
 
