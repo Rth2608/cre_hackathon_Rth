@@ -250,6 +250,7 @@ const WALLET_AUTH_SIWE_MESSAGE_HEADER = "x-wallet-auth-siwe-message";
 const WALLET_AUTH_SIWE_SIGNATURE_HEADER = "x-wallet-auth-siwe-signature";
 const WALLET_AUTH_SIWE_ADDRESS_HEADER = "x-wallet-auth-siwe-address";
 const WALLET_AUTH_SIWE_REQUEST_ID_HEADER = "x-wallet-auth-siwe-request-id";
+const WALLET_AUTH_SIWE_VERSION_HEADER = "x-wallet-auth-siwe-version";
 
 function toLowerAddress(value: string): string {
   return value.trim().toLowerCase();
@@ -369,7 +370,7 @@ async function signWithMiniKitFallback(input: {
 async function walletAuthWithMiniKit(input: {
   nonce: string;
   requestId: string;
-}): Promise<{ message: string; signature: string; walletAddress?: string }> {
+}): Promise<{ message: string; signature: string; walletAddress?: string; version?: number }> {
   if (typeof window === "undefined") {
     throw new Error("minikit_wallet_auth_unavailable: no_window");
   }
@@ -399,7 +400,8 @@ async function walletAuthWithMiniKit(input: {
   return {
     message,
     signature,
-    walletAddress: extractEvmAddress(payload.address)
+    walletAddress: extractEvmAddress(payload.address),
+    version: typeof payload.version === "number" && Number.isFinite(payload.version) ? payload.version : undefined
   };
 }
 
@@ -437,7 +439,8 @@ async function buildWalletAuthHeaders(input: {
         [WALLET_AUTH_SIWE_MESSAGE_HEADER]: encodeBase64Utf8(walletAuth.message),
         [WALLET_AUTH_SIWE_SIGNATURE_HEADER]: walletAuth.signature,
         [WALLET_AUTH_SIWE_ADDRESS_HEADER]: walletAuth.walletAddress ?? effectiveWalletAddress,
-        [WALLET_AUTH_SIWE_REQUEST_ID_HEADER]: requestId
+        [WALLET_AUTH_SIWE_REQUEST_ID_HEADER]: requestId,
+        ...(walletAuth.version ? { [WALLET_AUTH_SIWE_VERSION_HEADER]: String(walletAuth.version) } : {})
       },
       walletAddress: effectiveWalletAddress
     };

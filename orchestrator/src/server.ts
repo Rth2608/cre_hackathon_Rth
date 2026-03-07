@@ -27,13 +27,14 @@ import { enforceX402Payment } from "./x402";
 const PORT = Number.parseInt(process.env.PORT ?? "8787", 10);
 const MAX_RUN_ATTEMPTS = 2;
 const CORS_ALLOW_HEADERS =
-  "Content-Type, X-Wallet-Address, X-Payment, Payment-Signature, X-World-ID-Token, X-Wallet-Auth-Signature, X-Wallet-Auth-Timestamp, X-Wallet-Auth-Siwe-Message, X-Wallet-Auth-Siwe-Signature, X-Wallet-Auth-Siwe-Address, X-Wallet-Auth-Siwe-Request-Id";
+  "Content-Type, X-Wallet-Address, X-Payment, Payment-Signature, X-World-ID-Token, X-Wallet-Auth-Signature, X-Wallet-Auth-Timestamp, X-Wallet-Auth-Siwe-Message, X-Wallet-Auth-Siwe-Signature, X-Wallet-Auth-Siwe-Address, X-Wallet-Auth-Siwe-Request-Id, X-Wallet-Auth-Siwe-Version";
 const WALLET_AUTH_SIGNATURE_HEADER = "x-wallet-auth-signature";
 const WALLET_AUTH_TIMESTAMP_HEADER = "x-wallet-auth-timestamp";
 const WALLET_AUTH_SIWE_MESSAGE_HEADER = "x-wallet-auth-siwe-message";
 const WALLET_AUTH_SIWE_SIGNATURE_HEADER = "x-wallet-auth-siwe-signature";
 const WALLET_AUTH_SIWE_ADDRESS_HEADER = "x-wallet-auth-siwe-address";
 const WALLET_AUTH_SIWE_REQUEST_ID_HEADER = "x-wallet-auth-siwe-request-id";
+const WALLET_AUTH_SIWE_VERSION_HEADER = "x-wallet-auth-siwe-version";
 const DEFAULT_WALLET_AUTH_MAX_AGE_MS = 5 * 60_000;
 const STARTUP_SKIP_ENV_VALIDATION = parseBooleanEnv(process.env.SKIP_STARTUP_ENV_VALIDATION, false);
 const EIP1271_MAGIC_VALUE = "0x1626ba7e";
@@ -861,6 +862,34 @@ function parseSiweField(message: string, label: string): string | null {
   return match?.[1]?.trim() ?? null;
 }
 
+function buildEip191PrefixedMessage(message: string): string {
+  return `\x19Ethereum Signed Message:\n${message.length}${message}`;
+}
+
+function recoverWalletAuthCandidates(message: string, signature: string): string[] {
+  const candidates = new Set<string>();
+  const addCandidate = (value: string): void => {
+    try {
+      candidates.add(normalizeAddress(value));
+    } catch {
+      // Ignore invalid recovered values.
+    }
+  };
+
+  try {
+    addCandidate(verifyMessage(message, signature));
+  } catch {
+    // ignore
+  }
+  try {
+    addCandidate(verifyMessage(buildEip191PrefixedMessage(message), signature));
+  } catch {
+    // ignore
+  }
+
+  return Array.from(candidates);
+}
+
 function resolveRpcUrl(): string | null {
   const value = process.env.RPC_URL?.trim();
   return value && value.length > 0 ? value : null;
@@ -950,6 +979,7 @@ async function validateSiweWalletAuth(input: {
   declaredAddress?: string;
   expectedNonce: string;
   expectedRequestId: string;
+  siweVersion?: number;
 }): Promise<{ ok: true } | { ok: false; detail: string }> {
   const siweAddressRaw = parseSiweAddress(input.message);
   if (!siweAddressRaw) {
@@ -1023,13 +1053,24 @@ async function validateSiweWalletAuth(input: {
     }
   }
 
-  let recovered: string | null = null;
-  try {
-    recovered = normalizeAddress(verifyMessage(input.message, input.signature));
-  } catch {
-    recovered = null;
+  const recoveredCandidates = recoverWalletAuthCandidates(input.message, input.signature);
+  if (recoveredCandidates.includes(normalizedSiweAddress)) {
+    return { ok: true };
   }
-  if (recovered === normalizedSiweAddress) {
+
+  let safeOwnerRecovered: string | null = null;
+  for (const recovered of recoveredCandidates) {
+    const isOwner = await validateSafeOwnerSignature({
+      walletAddress: normalizedSiweAddress,
+      ownerAddress: recovered
+    });
+    if (isOwner) {
+      safeOwnerRecovered = recovered;
+      break;
+    }
+  }
+  const safeOwnerValid = safeOwnerRecovered !== null;
+  if (safeOwnerValid) {
     return { ok: true };
   }
 
@@ -1038,22 +1079,15 @@ async function validateSiweWalletAuth(input: {
     message: input.message,
     signature: input.signature
   });
-  const safeOwnerValid =
-    !eip1271Valid && recovered
-      ? await validateSafeOwnerSignature({
-          walletAddress: normalizedSiweAddress,
-          ownerAddress: recovered
-        })
-      : false;
-
-  if (!eip1271Valid && !safeOwnerValid) {
-    return {
-      ok: false,
-      detail: `siwe_signature_mismatch: expected=${normalizedSiweAddress}, recovered=${recovered ?? "none"}, eip1271=${eip1271Valid}, safeOwner=${safeOwnerValid}`
-    };
+  if (eip1271Valid) {
+    return { ok: true };
   }
 
-  return { ok: true };
+  const recoveredDetail = recoveredCandidates.length > 0 ? recoveredCandidates.join(",") : "none";
+  return {
+    ok: false,
+    detail: `siwe_signature_mismatch: expected=${normalizedSiweAddress}, recovered=${recoveredDetail}, eip1271=${eip1271Valid}, safeOwner=${safeOwnerValid}, version=${input.siweVersion ?? "unknown"}`
+  };
 }
 
 async function requireWalletRequestAuth(
@@ -1156,6 +1190,9 @@ async function requireWalletRequestAuth(
     }
     const expectedRequestId = `${req.method.toUpperCase()}:${path}`;
     const headerRequestId = req.headers.get(WALLET_AUTH_SIWE_REQUEST_ID_HEADER)?.trim() ?? "";
+    const siweVersionRaw = req.headers.get(WALLET_AUTH_SIWE_VERSION_HEADER)?.trim() ?? "";
+    const parsedSiweVersion = siweVersionRaw ? Number.parseInt(siweVersionRaw, 10) : Number.NaN;
+    const siweVersion = Number.isInteger(parsedSiweVersion) && parsedSiweVersion > 0 ? parsedSiweVersion : undefined;
     if (headerRequestId && headerRequestId !== expectedRequestId) {
       return {
         ok: false,
@@ -1170,7 +1207,8 @@ async function requireWalletRequestAuth(
       signature: siweSignature,
       declaredAddress: req.headers.get(WALLET_AUTH_SIWE_ADDRESS_HEADER)?.trim() ?? undefined,
       expectedNonce: timestampRaw,
-      expectedRequestId
+      expectedRequestId,
+      siweVersion
     });
     if (!siweValidation.ok) {
       return {
