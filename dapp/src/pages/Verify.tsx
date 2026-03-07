@@ -81,6 +81,10 @@ function formatShortAddress(value: string): string {
   return `${trimmed.slice(0, 6)}...${trimmed.slice(-4)}`;
 }
 
+function normalizeWorldIdSignal(value: string): string {
+  return value.trim().toLowerCase();
+}
+
 function formatRemainingDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) {
     return "expired";
@@ -162,10 +166,22 @@ function hasWorldIdProofMaterial(value: Record<string, unknown>): boolean {
 
 function readLegacyWorldIdProofPayload(
   value: Record<string, unknown>
-): { merkleRoot: string; nullifierHash: string; proof: string; verificationLevel?: string } | null {
+): {
+  merkleRoot: string;
+  nullifierHash: string;
+  proof: string;
+  verificationLevel?: string;
+  signalHash?: string;
+} | null {
   const readCandidate = (
     candidate: Record<string, unknown>
-  ): { merkleRoot: string; nullifierHash: string; proof: string; verificationLevel?: string } | null => {
+  ): {
+    merkleRoot: string;
+    nullifierHash: string;
+    proof: string;
+    verificationLevel?: string;
+    signalHash?: string;
+  } | null => {
     const proof = typeof candidate.proof === "string" ? candidate.proof.trim() : "";
     const nullifierHashRaw =
       typeof candidate.nullifier_hash === "string"
@@ -182,6 +198,8 @@ function readLegacyWorldIdProofPayload(
           ? candidate.credential_type
           : undefined;
     const verificationLevel = verificationLevelRaw?.trim();
+    const signalHashRaw = typeof candidate.signal_hash === "string" ? candidate.signal_hash : undefined;
+    const signalHash = signalHashRaw?.trim();
 
     if (!proof || !nullifierHash || !merkleRoot) {
       return null;
@@ -191,7 +209,8 @@ function readLegacyWorldIdProofPayload(
       merkleRoot,
       nullifierHash,
       proof,
-      verificationLevel
+      verificationLevel,
+      signalHash
     };
   };
 
@@ -250,7 +269,8 @@ function buildWorldProofFromIdKit(
         nullifier_hash: legacyPayload.nullifierHash,
         merkle_root: legacyPayload.merkleRoot,
         proof: legacyPayload.proof,
-        verification_level: legacyPayload.verificationLevel
+        verification_level: legacyPayload.verificationLevel,
+        signal_hash: legacyPayload.signalHash
       }
     ]
   };
@@ -628,6 +648,7 @@ export default function VerifyPage() {
   const activeAccount = useActiveAccount();
   const activeChain = useActiveWalletChain();
   const walletAddress = activeAccount?.address ?? "";
+  const worldIdSignal = normalizeWorldIdSignal(walletAddress);
   const walletConnected = walletAddress.length > 0;
   const thirdwebConfigured = isThirdwebClientConfigured();
   const { data: walletBalance, isLoading: walletBalanceLoading, isError: walletBalanceError } = useWalletBalance({
@@ -949,7 +970,7 @@ export default function VerifyPage() {
 
       const { commandPayload, finalPayload } = await runMiniVerifyCommand({
         action: worldIdConfig.mini.action,
-        signal: walletAddress,
+        signal: worldIdSignal,
         verification_level: requestedVerificationLevel
       });
       if (!commandPayload) {
@@ -963,7 +984,7 @@ export default function VerifyPage() {
 
       const proofBuildInput = {
         action: worldIdConfig.mini.action,
-        signal: walletAddress,
+        signal: worldIdSignal,
         signalHashHint: typeof commandPayload.signal === "string" ? commandPayload.signal : undefined,
         nonceHint: typeof commandPayload.timestamp === "string" ? commandPayload.timestamp : undefined
       };
@@ -1029,7 +1050,7 @@ export default function VerifyPage() {
     try {
       const proof = buildWorldProofFromIdKit(result, {
         action: worldIdConfig.external.action,
-        signal: walletAddress
+        signal: worldIdSignal
       });
       appendWorldIdDebugLog("external.verify.proof", summarizeWorldProof(proof));
       await verifyWorldIdWithProof({
@@ -1516,7 +1537,7 @@ export default function VerifyPage() {
                   <IDKitWidget
                     app_id={worldIdConfig.external.appId}
                     action={worldIdConfig.external.action}
-                    signal={walletAddress}
+                    signal={worldIdSignal}
                     verification_level={IDKitVerificationLevel.Device}
                     handleVerify={onVerifyWorldIdExternal}
                     onSuccess={() => undefined}
@@ -1534,7 +1555,7 @@ export default function VerifyPage() {
               <IDKitWidget
                 app_id={worldIdConfig.external.appId}
                 action={worldIdConfig.external.action}
-                signal={walletAddress}
+                signal={worldIdSignal}
                 verification_level={IDKitVerificationLevel.Device}
                 handleVerify={onVerifyWorldIdExternal}
                 onSuccess={() => undefined}
