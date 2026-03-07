@@ -1,0 +1,18 @@
+{
+  "requestId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "input": {
+    "question": "Will BTC close above 100000 USD by 2026-12-31?",
+    "description": "Prediction market listing request",
+    "sourceUrls": [
+      "https://www.reuters.com/world/us/example"
+    ],
+    "resolutionCriteria": "Use Reuters closing report on deadline date.",
+    "submitterAddress": "0x1111111111111111111111111111111111111111"
+  },
+  "node": {
+    "nodeId": "node-gpt",
+    "modelFamily": "gpt",
+    "modelName": "operator-gpt",
+    "operatorAddress": "0x1111111111111111111111111111111111111111"
+  }
+}

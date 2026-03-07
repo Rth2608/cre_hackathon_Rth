@@ -1,0 +1,13 @@
+staging-settings:
+  rpcs:
+    - chain-name: ethereum-testnet-sepolia
+      url: https://ethereum-sepolia-rpc.publicnode.com
+
+production-settings:
+  account:
+    workflow-owner-address: "0xdDD42a468a2D1022308768D0eB3924FC34c8B1cA" # replace before deploy
+  rpcs:
+    - chain-name: ethereum-testnet-sepolia
+      url: https://ethereum-sepolia-rpc.publicnode.com
+    - chain-name: ethereum-mainnet
+      url: https://ethereum-rpc.publicnode.com
