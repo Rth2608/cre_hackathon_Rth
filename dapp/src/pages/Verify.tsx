@@ -1,12 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import {
-  IDKitWidget,
-  type IErrorState,
-  type ISuccessResult,
-  VerificationLevel as IDKitVerificationLevel
-} from "@worldcoin/idkit";
-import {
   Command,
   MiniKit,
   ResponseEvent,
@@ -162,118 +156,6 @@ function hasWorldIdProofMaterial(value: Record<string, unknown>): boolean {
   }
 
   return false;
-}
-
-function readLegacyWorldIdProofPayload(
-  value: Record<string, unknown>
-): {
-  merkleRoot: string;
-  nullifierHash: string;
-  proof: string;
-  verificationLevel?: string;
-  signalHash?: string;
-} | null {
-  const readCandidate = (
-    candidate: Record<string, unknown>
-  ): {
-    merkleRoot: string;
-    nullifierHash: string;
-    proof: string;
-    verificationLevel?: string;
-    signalHash?: string;
-  } | null => {
-    const proof = typeof candidate.proof === "string" ? candidate.proof.trim() : "";
-    const nullifierHashRaw =
-      typeof candidate.nullifier_hash === "string"
-        ? candidate.nullifier_hash
-        : typeof candidate.nullifier === "string"
-          ? candidate.nullifier
-          : "";
-    const nullifierHash = nullifierHashRaw.trim();
-    const merkleRoot = typeof candidate.merkle_root === "string" ? candidate.merkle_root.trim() : "";
-    const verificationLevelRaw =
-      typeof candidate.verification_level === "string"
-        ? candidate.verification_level
-        : typeof candidate.credential_type === "string"
-          ? candidate.credential_type
-          : undefined;
-    const verificationLevel = verificationLevelRaw?.trim();
-    const signalHashRaw = typeof candidate.signal_hash === "string" ? candidate.signal_hash : undefined;
-    const signalHash = signalHashRaw?.trim();
-
-    if (!proof || !nullifierHash || !merkleRoot) {
-      return null;
-    }
-
-    return {
-      merkleRoot,
-      nullifierHash,
-      proof,
-      verificationLevel,
-      signalHash
-    };
-  };
-
-  const topLevel = readCandidate(value);
-  if (topLevel) {
-    return topLevel;
-  }
-
-  if (value.result && typeof value.result === "object" && !Array.isArray(value.result)) {
-    const nestedResult = readCandidate(value.result as Record<string, unknown>);
-    if (nestedResult) {
-      return nestedResult;
-    }
-  }
-
-  if (Array.isArray(value.responses)) {
-    for (const entry of value.responses) {
-      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-        continue;
-      }
-      const nestedResponse = readCandidate(entry as Record<string, unknown>);
-      if (nestedResponse) {
-        return nestedResponse;
-      }
-    }
-  }
-
-  return null;
-}
-
-function buildWorldProofFromIdKit(
-  result: ISuccessResult,
-  input: { action: string; signal: string }
-): Record<string, unknown> {
-  const rawResult = result as unknown as Record<string, unknown>;
-  if (looksLikeWorldIdV4ProofPayload(rawResult) && hasWorldIdProofMaterial(rawResult)) {
-    // World ID 4.0: forward completion payload as-is to backend verify.
-    return rawResult;
-  }
-
-  const legacyPayload = readLegacyWorldIdProofPayload(rawResult);
-  if (!legacyPayload) {
-    throw new Error("world_id_v4_payload_required: external_widget_returned_legacy_payload");
-  }
-
-  const identifier = resolveWorldIdCredentialIdentifier(legacyPayload.verificationLevel);
-  return {
-    protocol_version: "3.0",
-    nonce: `idkit-${Date.now()}-${Math.random()}`,
-    action: input.action,
-    signal: input.signal,
-    responses: [
-      {
-        identifier,
-        nullifier: legacyPayload.nullifierHash,
-        nullifier_hash: legacyPayload.nullifierHash,
-        merkle_root: legacyPayload.merkleRoot,
-        proof: legacyPayload.proof,
-        verification_level: legacyPayload.verificationLevel,
-        signal_hash: legacyPayload.signalHash
-      }
-    ]
-  };
 }
 
 function readLegacyMiniKitProofPayload(
@@ -673,7 +555,6 @@ export default function VerifyPage() {
   );
   const worldIdConfig = getWorldIdConfig();
   const miniWorldIdConfigured = worldIdConfig.mini.configured;
-  const externalWorldIdConfigured = worldIdConfig.external.configured;
   const worldChainVirtualConfig = getWorldChainVirtualConfig();
   const worldAppMiniRuntime = getWorldAppRuntimeMode() === "miniapp";
 
@@ -686,7 +567,6 @@ export default function VerifyPage() {
   const [runningRequestId, setRunningRequestId] = useState<string | null>(null);
   const [registrationMessage, setRegistrationMessage] = useState<string | null>(null);
   const [verifyingWorldId, setVerifyingWorldId] = useState(false);
-  const [worldProofJson, setWorldProofJson] = useState("");
   const [miniKitAvailable, setMiniKitAvailable] = useState(false);
   const [worldIdSession, setWorldIdSession] = useState<WorldIdSession | null>(null);
   const [worldIdDebugLogs, setWorldIdDebugLogs] = useState<WorldIdDebugEntry[]>([]);
@@ -818,7 +698,7 @@ export default function VerifyPage() {
     sourceLabel: string;
     appId: string;
     action: string;
-    clientSource: "miniapp" | "external" | "manual";
+    clientSource: "miniapp";
   }) => {
     if (!activeAccount) {
       throw new Error("wallet_account_required");
@@ -857,54 +737,6 @@ export default function VerifyPage() {
         raw: error instanceof Error ? error.message : String(error)
       });
       throw error;
-    }
-  };
-
-  const onVerifyWorldIdManual = async () => {
-    setRegistrationMessage(null);
-    setError(null);
-    setWorldIdDebugLogs([]);
-    appendWorldIdDebugLog("manual.verify.start", {
-      appId: worldIdConfig.external.appId,
-      action: worldIdConfig.external.action
-    });
-
-    if (!walletConnected) {
-      setError("Connect wallet before World ID verification.");
-      return;
-    }
-    if (!externalWorldIdConfigured) {
-      setError("Missing external World ID config. Set VITE_WORLD_ID_EXTERNAL_APP_ID / VITE_WORLD_ID_EXTERNAL_ACTION.");
-      return;
-    }
-
-    let parsedProof: Record<string, unknown>;
-    try {
-      parsedProof = JSON.parse(worldProofJson) as Record<string, unknown>;
-      appendWorldIdDebugLog("manual.verify.parsed_proof", summarizeWorldProof(parsedProof));
-    } catch {
-      setError("World ID proof JSON is invalid.");
-      return;
-    }
-    if (!looksLikeWorldIdV4ProofPayload(parsedProof)) {
-      setError("Manual proof must be a World ID 4.0 payload.");
-      return;
-    }
-
-    setVerifyingWorldId(true);
-    try {
-      await verifyWorldIdWithProof({
-        proof: parsedProof,
-        sourceLabel: "Manual",
-        appId: worldIdConfig.external.appId,
-        action: worldIdConfig.external.action,
-        clientSource: "manual"
-      });
-    } catch (err) {
-      appendWorldIdDebugLog("manual.verify.error", err instanceof Error ? err.message : String(err));
-      setError(getWorldIdErrorMessage(err));
-    } finally {
-      setVerifyingWorldId(false);
     }
   };
 
@@ -1032,45 +864,6 @@ export default function VerifyPage() {
       miniVerifyInFlightRef.current = false;
       setVerifyingWorldId(false);
     }
-  };
-
-  const onVerifyWorldIdExternal = async (result: ISuccessResult) => {
-    if (!walletConnected) {
-      setError("Connect wallet before World ID verification.");
-      return;
-    }
-    setRegistrationMessage(null);
-    setError(null);
-    setWorldIdDebugLogs([]);
-    appendWorldIdDebugLog("external.verify.start", {
-      appId: worldIdConfig.external.appId,
-      action: worldIdConfig.external.action
-    });
-    setVerifyingWorldId(true);
-    try {
-      const proof = buildWorldProofFromIdKit(result, {
-        action: worldIdConfig.external.action,
-        signal: worldIdSignal
-      });
-      appendWorldIdDebugLog("external.verify.proof", summarizeWorldProof(proof));
-      await verifyWorldIdWithProof({
-        proof,
-        sourceLabel: "External Widget",
-        appId: worldIdConfig.external.appId,
-        action: worldIdConfig.external.action,
-        clientSource: "external"
-      });
-    } catch (err) {
-      appendWorldIdDebugLog("external.verify.error", err instanceof Error ? err.message : String(err));
-      setError(getWorldIdErrorMessage(err));
-      throw err;
-    } finally {
-      setVerifyingWorldId(false);
-    }
-  };
-
-  const onWorldIdExternalError = (errorState: IErrorState) => {
-    setError(`world_id_widget_error: ${errorState.code}`);
   };
 
   const onClearWorldId = () => {
@@ -1495,119 +1288,46 @@ export default function VerifyPage() {
         </section>
 
         <section className="status-card">
-          <h2>World ID Verification</h2>
-          <p>
-            Verify with Mini App (World App) or External Widget. A wallet-bound World ID session token is required before node
-            activation.
-          </p>
+          <h2>World ID Verification (Mini App Only)</h2>
+          <p>World ID verification is only supported inside World App Mini App runtime.</p>
           <p className="config-warning runtime-note">
             {worldAppMiniRuntime
-              ? "Runtime: World App Mini App (in-app verification flow)"
-              : "Runtime: Web Browser (QR / external widget flow)"}
+              ? "Runtime: World App Mini App (supported)"
+              : "Runtime: Web Browser (unsupported). Open this app from World App Mini Apps."}
           </p>
           <p className="config-warning">
             Mini App: {worldIdConfig.mini.appId || "-"} / {worldIdConfig.mini.action || "-"}
           </p>
-          <p className="config-warning">
-            External: {worldIdConfig.external.appId || "-"} / {worldIdConfig.external.action || "-"}
-          </p>
           <div className="action-row">
-            {worldAppMiniRuntime ? (
-              <>
-                <label>
-                  Mini Level
-                  <select
-                    value={miniVerifyMode}
-                    onChange={(event) => setMiniVerifyMode(event.target.value as MiniVerifyMode)}
-                    disabled={verifyingWorldId}
-                  >
-                    <option value="orb_or_device">orb_or_device (recommended)</option>
-                    <option value="orb">orb only</option>
-                    <option value="device">device only</option>
-                  </select>
-                </label>
-                <button
-                  type="button"
-                  onClick={onVerifyWorldIdMiniApp}
-                  disabled={!walletConnected || verifyingWorldId || !miniWorldIdConfigured || !miniKitAvailable}
-                >
-                  {verifyingWorldId ? "Verifying..." : "Verify in World Mini App"}
-                </button>
-                {externalWorldIdConfigured && !miniKitAvailable && (
-                  <IDKitWidget
-                    app_id={worldIdConfig.external.appId}
-                    action={worldIdConfig.external.action}
-                    signal={worldIdSignal}
-                    verification_level={IDKitVerificationLevel.Device}
-                    handleVerify={onVerifyWorldIdExternal}
-                    onSuccess={() => undefined}
-                    onError={onWorldIdExternalError}
-                  >
-                    {({ open }: { open: () => void }) => (
-                      <button type="button" className="secondary" onClick={open} disabled={!walletConnected || verifyingWorldId}>
-                        {verifyingWorldId ? "Verifying..." : "Fallback: Verify with External Widget"}
-                      </button>
-                    )}
-                  </IDKitWidget>
-                )}
-              </>
-            ) : externalWorldIdConfigured ? (
-              <IDKitWidget
-                app_id={worldIdConfig.external.appId}
-                action={worldIdConfig.external.action}
-                signal={worldIdSignal}
-                verification_level={IDKitVerificationLevel.Device}
-                handleVerify={onVerifyWorldIdExternal}
-                onSuccess={() => undefined}
-                onError={onWorldIdExternalError}
+            <label>
+              Mini Level
+              <select
+                value={miniVerifyMode}
+                onChange={(event) => setMiniVerifyMode(event.target.value as MiniVerifyMode)}
+                disabled={verifyingWorldId}
               >
-                {({ open }: { open: () => void }) => (
-                  <button type="button" className="secondary" onClick={open} disabled={!walletConnected || verifyingWorldId}>
-                    {verifyingWorldId ? "Verifying..." : "Verify with External Widget"}
-                  </button>
-                )}
-              </IDKitWidget>
-            ) : (
-              <button type="button" className="secondary" disabled>
-                Verify with External Widget
-              </button>
-            )}
+                <option value="orb_or_device">orb_or_device (recommended)</option>
+                <option value="orb">orb only</option>
+                <option value="device">device only</option>
+              </select>
+            </label>
+            <button
+              type="button"
+              onClick={onVerifyWorldIdMiniApp}
+              disabled={!walletConnected || verifyingWorldId || !miniWorldIdConfigured || !miniKitAvailable || !worldAppMiniRuntime}
+            >
+              {verifyingWorldId ? "Verifying..." : "Verify in World Mini App"}
+            </button>
             <button type="button" className="secondary" onClick={onClearWorldId} disabled={!walletConnected}>
               Clear Session
             </button>
           </div>
-          {worldAppMiniRuntime && !miniKitAvailable && (
-            <p className="config-warning">
-              World App runtime detected, but MiniKit verify is unavailable in this context. Use fallback external widget.
-            </p>
-          )}
           {!worldAppMiniRuntime && (
-            <p className="config-warning">
-              Web mode uses external World ID widget (QR). Mini App verification is only available inside World App.
-            </p>
+            <p className="config-warning">Mini App runtime is required for verification.</p>
           )}
-          <details className="manual-world-proof">
-            <summary>Manual proof JSON (advanced debug input)</summary>
-            <label>
-              World ID Proof JSON
-              <textarea
-                value={worldProofJson}
-                onChange={(event) => setWorldProofJson(event.target.value)}
-                rows={7}
-                placeholder='{"protocol_version":"4.0","action":"your-action-id","responses":[{"nullifier_hash":"0x...","proof":"0x...","verification_level":"device"}]}'
-              />
-            </label>
-            <div className="action-row">
-              <button
-                type="button"
-                className="secondary"
-                onClick={onVerifyWorldIdManual}
-                disabled={!walletConnected || verifyingWorldId || !externalWorldIdConfigured}
-              >
-                {verifyingWorldId ? "Verifying..." : "Verify Manual Proof"}
-              </button>
-            </div>
-          </details>
+          {worldAppMiniRuntime && !miniKitAvailable && (
+            <p className="config-warning">MiniKit verify is unavailable in this World App context. Update World App and retry.</p>
+          )}
           {worldIdSession ? (
             <p>
               Session token active until {new Date(worldIdSession.expiresAt).toLocaleString()} ({worldIdSession.source}).

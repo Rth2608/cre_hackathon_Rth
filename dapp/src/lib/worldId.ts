@@ -36,7 +36,7 @@ function buildSessionStorageKey(walletAddress: string): string {
 }
 
 export function isWorldIdConfigured(): boolean {
-  return worldIdConfig.mini.configured || worldIdConfig.external.configured;
+  return worldIdConfig.mini.configured;
 }
 
 export function getWorldIdConfig(): WorldIdConfig {
