@@ -256,16 +256,18 @@ function isLikelyEvmAddress(value: string): boolean {
 }
 
 function resolveAuthWalletAddress(walletAddress: string, account?: Account): string {
+  if (MiniKit.isInstalled()) {
+    const miniWalletRaw = MiniKit.user?.walletAddress;
+    if (typeof miniWalletRaw === "string" && isLikelyEvmAddress(miniWalletRaw)) {
+      return toLowerAddress(miniWalletRaw);
+    }
+  }
   const accountWalletRaw =
     typeof (account as { address?: unknown } | undefined)?.address === "string"
       ? ((account as { address?: string }).address ?? "")
       : "";
   if (isLikelyEvmAddress(accountWalletRaw)) {
     return toLowerAddress(accountWalletRaw);
-  }
-  const miniWalletRaw = MiniKit.user?.walletAddress;
-  if (typeof miniWalletRaw === "string" && isLikelyEvmAddress(miniWalletRaw)) {
-    return toLowerAddress(miniWalletRaw);
   }
   return toLowerAddress(walletAddress);
 }
@@ -351,16 +353,7 @@ async function buildWalletAuthHeaders(input: {
     path: input.path,
     timestamp
   });
-  let signature: string;
-  try {
-    signature = await signMessage({
-      account: input.account,
-      message
-    });
-  } catch (error) {
-    if (!shouldFallbackToMiniKitSign(error)) {
-      throw toError(error);
-    }
+  const signWithMiniKitAndAlign = async (): Promise<string> => {
     const fallback = await signWithMiniKitFallback({ message });
     if (fallback.signerAddress && fallback.signerAddress !== effectiveWalletAddress) {
       effectiveWalletAddress = fallback.signerAddress;
@@ -371,9 +364,24 @@ async function buildWalletAuthHeaders(input: {
         timestamp
       });
       const corrected = await signWithMiniKitFallback({ message });
-      signature = corrected.signature;
-    } else {
-      signature = fallback.signature;
+      return corrected.signature;
+    }
+    return fallback.signature;
+  };
+  let signature: string;
+  if (MiniKit.isInstalled()) {
+    signature = await signWithMiniKitAndAlign();
+  } else {
+    try {
+      signature = await signMessage({
+        account: input.account,
+        message
+      });
+    } catch (error) {
+      if (!shouldFallbackToMiniKitSign(error)) {
+        throw toError(error);
+      }
+      signature = await signWithMiniKitAndAlign();
     }
   }
 
