@@ -42,6 +42,47 @@ const defaultForm: MarketRequestInput = {
   submitterAddress: ""
 };
 
+interface SimilarRequestTemplate {
+  id: "A" | "B";
+  label: string;
+  input: Omit<MarketRequestInput, "submitterAddress">;
+}
+
+const similarityTemplates: SimilarRequestTemplate[] = [
+  {
+    id: "A",
+    label: "BTC 130K (Template A)",
+    input: {
+      question: "Will Bitcoin close above $130,000 before December 31, 2026?",
+      description:
+        "Evaluate whether BTC/USD reaches at least one daily close above 130000 USD before 2026-12-31 23:59:59 UTC.",
+      resolutionCriteria:
+        "Resolve YES if a widely used BTC/USD spot index prints any daily close strictly above 130000 USD before the deadline. Otherwise resolve NO.",
+      sourceUrls: [
+        "https://www.coindesk.com/",
+        "https://cointelegraph.com/",
+        "https://www.coingecko.com/"
+      ]
+    }
+  },
+  {
+    id: "B",
+    label: "BTC 130K (Template B)",
+    input: {
+      question: "Can BTC post a daily close higher than $130k by the end of 2026?",
+      description:
+        "Check if Bitcoin records at least one day-end close above 130000 USD on major spot market reference feeds before the final day of 2026.",
+      resolutionCriteria:
+        "Resolve YES when any accepted BTC/USD daily close is greater than 130000 USD prior to 2026-12-31 23:59:59 UTC. If never exceeded, resolve NO.",
+      sourceUrls: [
+        "https://www.coindesk.com/",
+        "https://cointelegraph.com/",
+        "https://www.coingecko.com/"
+      ]
+    }
+  }
+];
+
 const MINI_VERIFY_TIMEOUT_MS = 20_000;
 const EXTERNAL_VERIFY_TIMEOUT_MS = 45_000;
 const SUBMIT_FLOW_TIMEOUT_MS = 120_000;
@@ -595,7 +636,7 @@ export default function SubmitPage() {
       ? "Set VITE_THIRDWEB_CLIENT_ID"
       : !worldIdConfigured
         ? "Configure World ID app/action env"
-        : "Ready (verify on submit)";
+        : "Ready (World ID required per submit)";
   const worldChainNativeBalanceText = worldChainBalancesLoading
     ? "Loading..."
     : worldChainBalances?.native
@@ -603,6 +644,18 @@ export default function SubmitPage() {
       : worldChainBalancesError
         ? "Failed to load"
         : "-";
+
+  const applySimilarityTemplate = (template: SimilarRequestTemplate) => {
+    setForm((prev) => ({
+      ...prev,
+      question: template.input.question,
+      description: template.input.description,
+      resolutionCriteria: template.input.resolutionCriteria,
+      sourceUrls: [...template.input.sourceUrls],
+      submitterAddress: walletAddress || prev.submitterAddress
+    }));
+    setError(null);
+  };
 
   const runExternalProofFlow = (): Promise<Record<string, unknown>> => {
     if (worldAppMiniRuntime) {
@@ -857,8 +910,8 @@ export default function SubmitPage() {
           <p className="eyebrow">CRE + DON Consensus</p>
           <h1>Submit Market Verification Request</h1>
           <p>
-            Enter market question, evidence URLs, and resolver criteria. On submit, the orchestrator immediately
-            matches verifier nodes, computes consensus, and finalizes on-chain.
+            Enter market question, evidence URLs, and resolver criteria. Submit first runs World ID verification, then
+            queues the request for Verify-stage screening and execution.
           </p>
           <div className="hero-chips">
             <span className="chip">4 DON Nodes</span>
@@ -868,8 +921,8 @@ export default function SubmitPage() {
           </div>
           <p className="config-warning runtime-note">
             {worldAppMiniRuntime
-              ? "In World App: Submit triggers in-app Mini verification."
-              : "In browser: Submit triggers external World ID QR verification."}
+              ? "In World App: Submit triggers in-app World ID verification before queueing."
+              : "In browser: Submit triggers QR World ID verification before queueing."}
           </p>
           <div className="wallet-row">
             {thirdwebConfigured ? (
@@ -962,7 +1015,7 @@ export default function SubmitPage() {
                 Request Create: {requestCreateReady ? "READY" : "BLOCKED"} ({requestCreateReason})
               </p>
               <p className={`snapshot-capability ${requestSubmitReady ? "ok" : "warn"}`}>
-                Request Submit (World ID per request): {requestSubmitReady ? "READY" : "BLOCKED"} ({requestSubmitReason})
+                Request Submit (World ID + Queue): {requestSubmitReady ? "READY" : "BLOCKED"} ({requestSubmitReason})
               </p>
             </div>
             <div className="action-row">
@@ -970,6 +1023,24 @@ export default function SubmitPage() {
                 Open Verify Page
               </button>
             </div>
+          </div>
+        </section>
+
+        <section className="status-card">
+          <h2>Quick Similarity Templates</h2>
+          <p>Choose Template A, submit once, then choose Template B and submit again to test similarity screening.</p>
+          <div className="action-row">
+            {similarityTemplates.map((template) => (
+              <button
+                key={template.id}
+                type="button"
+                className="secondary"
+                onClick={() => applySimilarityTemplate(template)}
+                disabled={submitting}
+              >
+                Fill {template.label}
+              </button>
+            ))}
           </div>
         </section>
 
@@ -1029,10 +1100,10 @@ export default function SubmitPage() {
           <div className="action-row">
             <button type="submit" disabled={submitting || !walletConnected || !thirdwebConfigured || !worldIdConfigured}>
               {submitting
-                ? "Verifying And Submitting..."
+                ? "Verifying And Queueing..."
                 : worldAppMiniRuntime
-                  ? "Submit And Verify (Mini App)"
-                  : "Submit And Verify (QR)"}
+                  ? "Verify And Queue (Mini App)"
+                  : "Verify And Queue (QR)"}
             </button>
           </div>
         </form>
@@ -1064,7 +1135,7 @@ export default function SubmitPage() {
           <section className="status-card">
             <h2>Request Submitted</h2>
             <p className="mono">{requestId}</p>
-            <p>Verification was triggered automatically for this request.</p>
+            <p>Queued successfully. Open Verify page to run the verification workflow.</p>
             <div className="action-row">
               <button
                 type="button"

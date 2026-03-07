@@ -9,6 +9,15 @@ const NODE_LABELS: Record<CanonicalModelFamily, string> = {
   grok: "Grok Node"
 };
 
+type RuntimeNodeExecutionMode = "deterministic" | "cre_confidential_http";
+
+interface RuntimeNodeVerifierConfig {
+  mode: RuntimeNodeExecutionMode;
+  timeoutMs: number;
+  endpointUrl?: string;
+  authToken?: string;
+}
+
 function digestHex(requestId: string, node: RuntimeNode, input: MarketRequestInput): string {
   const payload = [
     requestId,
@@ -48,11 +57,212 @@ function deriveEvidenceSummary(input: MarketRequestInput): string {
 }
 
 function deterministicTimestamp(seedHex: string): string {
-  const offset = Number.parseInt(seedHex.slice(12, 20), 16) % 10;
-  return new Date(Date.now() - offset * 1000).toISOString();
+  const baseEpochMs = Date.UTC(2026, 0, 1, 0, 0, 0);
+  const offsetSeconds = Number.parseInt(seedHex.slice(12, 20), 16) % (365 * 24 * 60 * 60);
+  return new Date(baseEpochMs + offsetSeconds * 1000).toISOString();
 }
 
-export async function runRuntimeNode(
+function parseJsonStringMap(raw: string | undefined): Record<string, string> {
+  if (!raw || !raw.trim()) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+
+    const output: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof key !== "string") {
+        continue;
+      }
+      if (typeof value !== "string") {
+        continue;
+      }
+
+      const normalizedKey = key.trim().toLowerCase();
+      const normalizedValue = value.trim();
+      if (!normalizedKey || !normalizedValue) {
+        continue;
+      }
+      output[normalizedKey] = normalizedValue;
+    }
+    return output;
+  } catch {
+    return {};
+  }
+}
+
+function resolveRuntimeNodeExecutionMode(): RuntimeNodeExecutionMode {
+  const raw = process.env.RUNTIME_NODE_EXECUTION_MODE?.trim().toLowerCase();
+  if (raw === "cre_confidential_http" || raw === "cre") {
+    return "cre_confidential_http";
+  }
+  return "deterministic";
+}
+
+function resolveTimeoutMs(): number {
+  const parsed = Number.parseInt(process.env.RUNTIME_NODE_CRE_VERIFY_TIMEOUT_MS ?? "12000", 10);
+  if (!Number.isInteger(parsed) || parsed < 500 || parsed > 60_000) {
+    return 12_000;
+  }
+  return parsed;
+}
+
+function resolveMappedValue(
+  rawMap: string | undefined,
+  runtimeNode: RuntimeNode
+): string | undefined {
+  const map = parseJsonStringMap(rawMap);
+  const byNodeId = map[runtimeNode.nodeId.trim().toLowerCase()];
+  if (byNodeId) {
+    return byNodeId;
+  }
+  const byOperator = map[runtimeNode.operatorAddress.trim().toLowerCase()];
+  if (byOperator) {
+    return byOperator;
+  }
+  const byFamily = map[runtimeNode.modelFamily.trim().toLowerCase()];
+  if (byFamily) {
+    return byFamily;
+  }
+  return undefined;
+}
+
+function resolveRuntimeNodeVerifierConfig(runtimeNode: RuntimeNode): RuntimeNodeVerifierConfig {
+  const mode = resolveRuntimeNodeExecutionMode();
+  const timeoutMs = resolveTimeoutMs();
+  if (mode === "deterministic") {
+    return {
+      mode,
+      timeoutMs
+    };
+  }
+
+  const endpointUrl =
+    resolveMappedValue(process.env.RUNTIME_NODE_CRE_VERIFY_URL_MAP_JSON, runtimeNode) ??
+    process.env.RUNTIME_NODE_CRE_VERIFY_URL?.trim();
+  const authToken =
+    resolveMappedValue(process.env.RUNTIME_NODE_CRE_VERIFY_AUTH_TOKEN_MAP_JSON, runtimeNode) ??
+    process.env.RUNTIME_NODE_CRE_VERIFY_AUTH_TOKEN?.trim();
+
+  return {
+    mode,
+    timeoutMs,
+    endpointUrl: endpointUrl && endpointUrl.length > 0 ? endpointUrl : undefined,
+    authToken: authToken && authToken.length > 0 ? authToken : undefined
+  };
+}
+
+function normalizeGeneratedAt(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) {
+    return new Date().toISOString();
+  }
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) {
+    return new Date().toISOString();
+  }
+  return new Date(parsed).toISOString();
+}
+
+function extractReportPayload(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  const top = value as Record<string, unknown>;
+  const data =
+    top.data && typeof top.data === "object" && !Array.isArray(top.data) ? (top.data as Record<string, unknown>) : top;
+  const report =
+    data.report && typeof data.report === "object" && !Array.isArray(data.report)
+      ? (data.report as Record<string, unknown>)
+      : data;
+  return report;
+}
+
+function toAuditTrailSegment(value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return "";
+  }
+  const record = value as Record<string, unknown>;
+  const providerRequestId =
+    typeof record.providerRequestId === "string"
+      ? record.providerRequestId
+      : typeof record.provider_request_id === "string"
+        ? record.provider_request_id
+        : "";
+  const policyVersion = typeof record.policyVersion === "string" ? record.policyVersion : "";
+  const segments = [providerRequestId ? `providerRequestId=${providerRequestId}` : "", policyVersion ? `policyVersion=${policyVersion}` : ""].filter(
+    Boolean
+  );
+  return segments.join(" ");
+}
+
+function parseConfidentialVerifierResponse(args: {
+  requestId: string;
+  runtimeNode: RuntimeNode;
+  payload: unknown;
+}): NodeReport {
+  if (args.payload && typeof args.payload === "object" && !Array.isArray(args.payload)) {
+    const topLevel = args.payload as Record<string, unknown>;
+    const result = topLevel.result;
+    if (result && typeof result === "object" && !Array.isArray(result)) {
+      const status = String((result as Record<string, unknown>).status ?? "").toUpperCase();
+      if (status === "ACCEPTED") {
+        throw new Error(
+          "confidential_verifier_async_gateway_response: CRE gateway accepted execution but did not return a report payload. Use an adapter endpoint that waits for execution output and returns { report: ... }."
+        );
+      }
+    }
+  }
+
+  const reportPayload = extractReportPayload(args.payload);
+  const verdictRaw = typeof reportPayload.verdict === "string" ? reportPayload.verdict.trim().toUpperCase() : "";
+  if (verdictRaw !== "PASS" && verdictRaw !== "FAIL") {
+    throw new Error(`confidential_verifier_invalid_verdict:${verdictRaw || "missing"}`);
+  }
+  const confidence = Number(reportPayload.confidence);
+  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+    throw new Error("confidential_verifier_invalid_confidence");
+  }
+
+  const rationaleRaw =
+    typeof reportPayload.rationale === "string" && reportPayload.rationale.trim()
+      ? reportPayload.rationale.trim()
+      : `${NODE_LABELS[args.runtimeNode.modelFamily] ?? "Model Node"} returned no rationale.`;
+  const evidenceRaw =
+    typeof reportPayload.evidenceSummary === "string" && reportPayload.evidenceSummary.trim()
+      ? reportPayload.evidenceSummary.trim()
+      : "No evidence summary returned.";
+
+  const auditTrail = toAuditTrailSegment(
+    (args.payload as Record<string, unknown>)?.data && typeof (args.payload as Record<string, unknown>).data === "object"
+      ? (args.payload as Record<string, unknown>).data
+      : args.payload
+  );
+  const evidenceSummary = auditTrail ? `${evidenceRaw} | ${auditTrail}` : evidenceRaw;
+
+  const baseReport = {
+    requestId: args.requestId,
+    nodeId: args.runtimeNode.nodeId,
+    verdict: verdictRaw as NodeVerdict,
+    confidence,
+    rationale: rationaleRaw,
+    evidenceSummary,
+    generatedAt: normalizeGeneratedAt(reportPayload.generatedAt)
+  };
+
+  const reportHashCandidate = typeof reportPayload.reportHash === "string" ? reportPayload.reportHash.trim().toLowerCase() : "";
+  const reportHash = /^0x[0-9a-f]{64}$/.test(reportHashCandidate) ? reportHashCandidate : hashObject(baseReport);
+
+  return {
+    ...baseReport,
+    reportHash
+  };
+}
+
+async function runRuntimeNodeDeterministic(
   requestId: string,
   input: MarketRequestInput,
   runtimeNode: RuntimeNode
@@ -81,6 +291,73 @@ export async function runRuntimeNode(
     ...reportCore,
     reportHash
   };
+}
+
+async function runRuntimeNodeViaConfidentialVerifier(
+  requestId: string,
+  input: MarketRequestInput,
+  runtimeNode: RuntimeNode,
+  config: RuntimeNodeVerifierConfig
+): Promise<NodeReport> {
+  if (!config.endpointUrl) {
+    throw new Error("RUNTIME_NODE_CRE_VERIFY_URL (or *_URL_MAP_JSON) is required when RUNTIME_NODE_EXECUTION_MODE=cre_confidential_http");
+  }
+
+  const headers = new Headers({
+    "Content-Type": "application/json",
+    "X-Cre-Request-Id": requestId,
+    "X-Cre-Operator-Address": runtimeNode.operatorAddress,
+    "X-Cre-Node-Id": runtimeNode.nodeId,
+    "X-Cre-Model-Family": runtimeNode.modelFamily
+  });
+  if (config.authToken) {
+    headers.set("Authorization", `Bearer ${config.authToken}`);
+  }
+
+  const response = await fetch(config.endpointUrl, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      requestId,
+      input,
+      node: {
+        nodeId: runtimeNode.nodeId,
+        modelFamily: runtimeNode.modelFamily,
+        modelName: runtimeNode.modelName,
+        operatorAddress: runtimeNode.operatorAddress
+      }
+    }),
+    signal: AbortSignal.timeout(config.timeoutMs)
+  });
+
+  if (!response.ok) {
+    throw new Error(`confidential_verifier_http_${response.status}`);
+  }
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error("confidential_verifier_invalid_json");
+  }
+
+  return parseConfidentialVerifierResponse({
+    requestId,
+    runtimeNode,
+    payload
+  });
+}
+
+export async function runRuntimeNode(
+  requestId: string,
+  input: MarketRequestInput,
+  runtimeNode: RuntimeNode
+): Promise<NodeReport> {
+  const config = resolveRuntimeNodeVerifierConfig(runtimeNode);
+  if (config.mode === "cre_confidential_http") {
+    return runRuntimeNodeViaConfidentialVerifier(requestId, input, runtimeNode, config);
+  }
+  return runRuntimeNodeDeterministic(requestId, input, runtimeNode);
 }
 
 export async function runAllRuntimeNodes(

@@ -25,6 +25,7 @@ import {
   listNodes,
   listRequests,
   requestNodeChallenge,
+  runVerificationForWallet,
   sendNodeHeartbeat,
   verifyWorldIdForWallet,
   type RegisteredNode,
@@ -574,6 +575,7 @@ export default function VerifyPage() {
   const [error, setError] = useState<string | null>(null);
   const [registeringNode, setRegisteringNode] = useState(false);
   const [sendingHeartbeat, setSendingHeartbeat] = useState(false);
+  const [runningRequestId, setRunningRequestId] = useState<string | null>(null);
   const [registrationMessage, setRegistrationMessage] = useState<string | null>(null);
   const [verifyingWorldId, setVerifyingWorldId] = useState(false);
   const [worldProofJson, setWorldProofJson] = useState("");
@@ -1058,6 +1060,10 @@ export default function VerifyPage() {
   const worldIdStatus = worldIdSession
     ? `Verified (${worldIdSession.verificationLevel ?? "unknown"})`
     : "Not verified";
+  const worldIdSessionActive =
+    worldIdSession && Number.isFinite(Date.parse(worldIdSession.expiresAt))
+      ? Date.parse(worldIdSession.expiresAt) > Date.now()
+      : Boolean(worldIdSession?.token);
   const worldIdRemaining =
     worldIdSession && Number.isFinite(Date.parse(worldIdSession.expiresAt))
       ? formatRemainingDuration(Date.parse(worldIdSession.expiresAt) - Date.now())
@@ -1156,6 +1162,42 @@ export default function VerifyPage() {
     }
   };
 
+  const onRunQueuedRequest = async (record: RequestRecord) => {
+    setRegistrationMessage(null);
+    setError(null);
+
+    if (!walletConnected || !activeAccount) {
+      setError("Connect wallet before running queued verification.");
+      return;
+    }
+    if (record.input.submitterAddress.trim().toLowerCase() !== walletAddress.trim().toLowerCase()) {
+      setError("Connected wallet must match request submitter.");
+      return;
+    }
+    if (!worldIdSession?.token || !worldIdSessionActive) {
+      setError("Verify World ID first to run queued verification.");
+      return;
+    }
+
+    setRunningRequestId(record.requestId);
+    try {
+      await runVerificationForWallet(record.requestId, walletAddress, worldIdSession.token, activeAccount);
+      clearWorldIdSession(walletAddress);
+      setWorldIdSession(null);
+      setRegistrationMessage(`Queued request ${record.requestId} processed.`);
+      await load();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes("world_id_token_")) {
+        clearWorldIdSession(walletAddress);
+        setWorldIdSession(null);
+      }
+      setError(message);
+    } finally {
+      setRunningRequestId(null);
+    }
+  };
+
   const returnToPath = useMemo(() => {
     const params = new URLSearchParams(location.search);
     const raw = params.get("returnTo")?.trim() ?? "";
@@ -1164,6 +1206,23 @@ export default function VerifyPage() {
     }
     return raw;
   }, [location.search]);
+
+  const sortedRequests = useMemo(() => {
+    return [...requests].sort((a, b) => {
+      const aPending = a.status === "PENDING";
+      const bPending = b.status === "PENDING";
+      if (aPending && bPending) {
+        return a.createdAt.localeCompare(b.createdAt);
+      }
+      if (aPending) {
+        return -1;
+      }
+      if (bPending) {
+        return 1;
+      }
+      return b.updatedAt.localeCompare(a.updatedAt);
+    });
+  }, [requests]);
 
   const toggleModelFamily = (family: ModelFamily) => {
     setNodeForm((prev) => {
@@ -1536,16 +1595,16 @@ export default function VerifyPage() {
         </section>
 
         <section className="status-card">
-          <h2>Auto Verification Flow</h2>
-          <p>Manual verification is disabled in this page. Verification runs automatically on request submission.</p>
+          <h2>Queued Verification Flow</h2>
+          <p>Submit creates a queued request. Verify stage performs World ID + run-verification with conflict checks.</p>
           <p>
-            Flow: <code>request submit - x402 check - node match - consensus - on-chain finalize</code>
+            Flow: <code>request submit - queue screening - verify/run - node match - consensus - on-chain finalize</code>
           </p>
         </section>
 
         <section className="status-card">
           <h2>Recent Requests</h2>
-          <p className="config-warning">This list is loaded from on-chain finalization events for the active registry.</p>
+          <p className="config-warning">Pending queue runs automatically in arrival order. Rejected requests show screening results.</p>
           {loading ? (
             <p>Loading requests...</p>
           ) : requests.length === 0 ? (
@@ -1555,23 +1614,65 @@ export default function VerifyPage() {
               <div className="request-head">
                 <span>Request</span>
                 <span>Status</span>
+                <span>Priority</span>
                 <span>Attempts</span>
                 <span>Updated</span>
                 <span>Action</span>
               </div>
-              {requests.map((record) => {
+              {sortedRequests.map((record) => {
+                const statusTone =
+                  record.status === "FINALIZED"
+                    ? "ok"
+                    : record.status === "REJECTED_DUPLICATE" || record.status === "REJECTED_CONFLICT"
+                      ? "bad"
+                      : record.status.startsWith("FAILED_")
+                        ? "bad"
+                        : "warn";
+                const ownedByConnectedWallet =
+                  walletConnected &&
+                  record.input.submitterAddress.trim().toLowerCase() === walletAddress.trim().toLowerCase();
+                const canRunPending =
+                  record.status === "PENDING" &&
+                  ownedByConnectedWallet &&
+                  Boolean(worldIdSession?.token) &&
+                  worldIdSessionActive &&
+                  runningRequestId === null;
+                const pendingReason =
+                  !walletConnected
+                    ? "connect wallet"
+                    : !ownedByConnectedWallet
+                      ? "submitter wallet only"
+                      : !worldIdSession?.token || !worldIdSessionActive
+                        ? "verify world id"
+                        : runningRequestId !== null
+                          ? "another run in progress"
+                          : "ready";
                 return (
                   <div key={record.requestId} className="request-row">
                     <span className="mono small">{record.requestId}</span>
-                    <span className={`status-badge ${record.status === "FINALIZED" ? "ok" : "warn"}`}>
+                    <span className={`status-badge ${statusTone}`}>
                       {record.status}
                     </span>
+                    <span>{record.queuePriority ?? "-"}</span>
                     <span>{record.runAttempts}/2</span>
                     <span>{new Date(record.updatedAt).toLocaleString()}</span>
                     <span className="inline-row">
                       <Link className="text-link" to={`/result/${encodeURIComponent(record.requestId)}`}>
                         Result
                       </Link>
+                      {record.status === "PENDING" && (
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() => void onRunQueuedRequest(record)}
+                          disabled={!canRunPending || runningRequestId === record.requestId}
+                        >
+                          {runningRequestId === record.requestId ? "Running..." : "Run Verify"}
+                        </button>
+                      )}
+                      {record.status === "PENDING" && !canRunPending && (
+                        <span className="small mono">({pendingReason})</span>
+                      )}
                     </span>
                   </div>
                 );

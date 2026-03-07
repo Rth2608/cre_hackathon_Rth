@@ -144,6 +144,7 @@ export default function ResultPage() {
     if (!ownedByConnectedWallet) return "Connected wallet does not match request submitter";
     if (request.status === "RUNNING") return "Already running";
     if (request.status === "FINALIZED") return "Already finalized";
+    if (request.status === "REJECTED_DUPLICATE" || request.status === "REJECTED_CONFLICT") return "Rejected in queue screening";
     if (request.runAttempts >= 2) return "Max attempts reached";
     if (!worldIdSession?.token || !worldIdSessionActive) return "Verify World ID again";
     return "Ready";
@@ -272,10 +273,52 @@ export default function ResultPage() {
               <h2>Request Status</h2>
               <p>
                 <strong>Status:</strong>{" "}
-                <span className={`status-badge ${request.status === "FINALIZED" ? "ok" : "warn"}`}>
+                <span
+                  className={`status-badge ${
+                    request.status === "FINALIZED"
+                      ? "ok"
+                      : request.status === "REJECTED_DUPLICATE" || request.status === "REJECTED_CONFLICT" || request.status.startsWith("FAILED_")
+                        ? "bad"
+                        : "warn"
+                  }`}
+                >
                   {request.status}
                 </span>
               </p>
+              <p>
+                <strong>Queue Priority:</strong> {request.queuePriority ?? "-"}
+              </p>
+              {request.queueDecision && (
+                <>
+                  <p>
+                    <strong>Queue Decision:</strong> {request.queueDecision.decision}
+                  </p>
+                  <p>
+                    <strong>Queue Source:</strong> {request.queueDecision.source}
+                  </p>
+                  <p>
+                    <strong>Queue Reason:</strong> {request.queueDecision.reason ?? "-"}
+                  </p>
+                </>
+              )}
+              {request.vectorSync && (
+                <>
+                  <p>
+                    <strong>Vector Sync:</strong> {request.vectorSync.state} / {request.vectorSync.vectorStatus}
+                  </p>
+                  <p>
+                    <strong>Vector Attempts:</strong> {request.vectorSync.attempts}
+                  </p>
+                  <p>
+                    <strong>Vector Updated:</strong> {new Date(request.vectorSync.updatedAt).toLocaleString()}
+                  </p>
+                  {request.vectorSync.lastError && (
+                    <p>
+                      <strong>Vector Error:</strong> {request.vectorSync.lastError}
+                    </p>
+                  )}
+                </>
+              )}
               <p>
                 <strong>Attempts:</strong> {request.runAttempts}/2
               </p>

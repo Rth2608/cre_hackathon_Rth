@@ -98,6 +98,9 @@ function buildRequestResponse(record: StoredRequest): Record<string, unknown> {
   return {
     requestId: record.requestId,
     status: record.status,
+    vectorSync: record.vectorSync,
+    queuePriority: record.queuePriority,
+    queueDecision: record.queueDecision,
     runAttempts: record.runAttempts,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
@@ -122,7 +125,643 @@ function parseRequestIdFromPath(pathname: string, regex: RegExp): string | null 
 }
 
 function resolveRequestVerificationPrice(): string {
-  return process.env.X402_PRICE_REQUEST_CREATE?.trim() || process.env.X402_PRICE_RUN_VERIFICATION?.trim() || "$0.05";
+  return process.env.X402_PRICE_RUN_VERIFICATION?.trim() || process.env.X402_PRICE_REQUEST_CREATE?.trim() || "$0.05";
+}
+
+function resolveRequestRequireWorldIdOnCreate(): boolean {
+  return parseBooleanEnv(process.env.REQUEST_REQUIRE_WORLD_ID_ON_CREATE, true);
+}
+
+function resolveRequestRejectConflictEnabled(): boolean {
+  return parseBooleanEnv(process.env.REQUEST_REJECT_CONFLICT_ENABLED, true);
+}
+
+function resolveRequestScreeningServiceUrl(): string | null {
+  const value = process.env.REQUEST_SCREENING_HTTP_URL?.trim();
+  return value ? value : null;
+}
+
+function resolveRequestScreeningServiceTimeoutMs(): number {
+  const raw = process.env.REQUEST_SCREENING_TIMEOUT_MS?.trim();
+  if (!raw) {
+    return 6000;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isInteger(parsed) || parsed < 500 || parsed > 30_000) {
+    return 6000;
+  }
+  return parsed;
+}
+
+function resolveRequestVectorSyncServiceUrl(): string | null {
+  const value = process.env.REQUEST_VECTOR_SYNC_HTTP_URL?.trim();
+  return value ? value : null;
+}
+
+function resolveRequestVectorSyncEnabled(): boolean {
+  const fallback = resolveRequestVectorSyncServiceUrl() !== null;
+  return parseBooleanEnv(process.env.REQUEST_VECTOR_SYNC_ENABLED, fallback);
+}
+
+function resolveRequestVectorSyncTimeoutMs(): number {
+  const raw = process.env.REQUEST_VECTOR_SYNC_TIMEOUT_MS?.trim();
+  if (!raw) {
+    return 6000;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isInteger(parsed) || parsed < 500 || parsed > 30_000) {
+    return 6000;
+  }
+  return parsed;
+}
+
+function resolveRequestVectorSyncBlockOnFailure(): boolean {
+  return parseBooleanEnv(process.env.REQUEST_VECTOR_SYNC_BLOCK_ON_FAILURE, true);
+}
+
+function mapRequestStatusToVectorStatus(
+  status: RequestStatus
+): NonNullable<StoredRequest["vectorSync"]>["vectorStatus"] {
+  if (status === "PENDING") {
+    return "QUEUED";
+  }
+  if (status === "RUNNING") {
+    return "VERIFYING";
+  }
+  if (status === "FINALIZED") {
+    return "APPROVED_PENDING_OPEN";
+  }
+  if (isRejectedRequestStatus(status)) {
+    return "REJECTED";
+  }
+  return "REJECTED";
+}
+
+function isVectorSyncGateStatus(status: RequestStatus): boolean {
+  return status === "FINALIZED" || isRejectedRequestStatus(status);
+}
+
+function isVectorSyncAppliedForStatus(record: StoredRequest, status: RequestStatus): boolean {
+  if (!resolveRequestVectorSyncEnabled()) {
+    return true;
+  }
+  const expected = mapRequestStatusToVectorStatus(status);
+  return record.vectorSync?.state === "APPLIED" && record.vectorSync.vectorStatus === expected;
+}
+
+function buildVectorSyncPayload(record: StoredRequest, vectorStatus: NonNullable<StoredRequest["vectorSync"]>["vectorStatus"]) {
+  return {
+    requestId: record.requestId,
+    requestStatus: record.status,
+    vectorStatus,
+    question: record.input.question,
+    description: record.input.description,
+    sourceUrls: record.input.sourceUrls,
+    resolutionCriteria: record.input.resolutionCriteria,
+    submitterAddress: record.input.submitterAddress,
+    queuePriority: record.queuePriority,
+    queueDecision: record.queueDecision,
+    consensus: record.consensus
+      ? {
+          aggregateScoreBps: record.consensus.aggregateScoreBps,
+          finalVerdict: record.consensus.finalVerdict,
+          responders: record.consensus.responders,
+          finalReportHash: record.consensus.finalReportHash
+        }
+      : undefined,
+    onchainReceipt: record.onchainReceipt
+      ? {
+          txHash: record.onchainReceipt.txHash,
+          chainId: record.onchainReceipt.chainId,
+          blockNumber: record.onchainReceipt.blockNumber,
+          simulated: record.onchainReceipt.simulated
+        }
+      : undefined,
+    updatedAt: record.updatedAt,
+    createdAt: record.createdAt
+  };
+}
+
+async function syncRequestVectorStatus(
+  record: StoredRequest,
+  trigger: string
+): Promise<StoredRequest> {
+  if (!resolveRequestVectorSyncEnabled()) {
+    return record;
+  }
+
+  const vectorStatus = mapRequestStatusToVectorStatus(record.status);
+  if (record.vectorSync?.state === "APPLIED" && record.vectorSync.vectorStatus === vectorStatus) {
+    return record;
+  }
+
+  const currentAttempts = record.vectorSync?.attempts ?? 0;
+  const applyingRecord: StoredRequest = {
+    ...record,
+    vectorSync: {
+      state: "APPLYING",
+      vectorStatus,
+      attempts: currentAttempts + 1,
+      updatedAt: nowIso(),
+      lastError: undefined
+    }
+  };
+  await saveRequest(applyingRecord);
+
+  const url = resolveRequestVectorSyncServiceUrl();
+  if (!url) {
+    const failedNoUrlRecord: StoredRequest = {
+      ...applyingRecord,
+      vectorSync: {
+        ...applyingRecord.vectorSync!,
+        state: "FAILED",
+        updatedAt: nowIso(),
+        lastError: "vector_sync_url_not_configured"
+      }
+    };
+    await saveRequest(failedNoUrlRecord);
+    return failedNoUrlRecord;
+  }
+
+  const timeoutController = new AbortController();
+  const timeoutId = setTimeout(() => timeoutController.abort(), resolveRequestVectorSyncTimeoutMs());
+  try {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json"
+    };
+    const token = process.env.REQUEST_VECTOR_SYNC_AUTH_TOKEN?.trim();
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(buildVectorSyncPayload(applyingRecord, vectorStatus)),
+      signal: timeoutController.signal
+    });
+
+    if (!response.ok) {
+      const detail = (await response.text()).trim().slice(0, 300);
+      throw new Error(`vector_sync_http_${response.status}${detail ? `:${detail}` : ""}`);
+    }
+
+    const appliedRecord: StoredRequest = {
+      ...applyingRecord,
+      vectorSync: {
+        ...applyingRecord.vectorSync!,
+        state: "APPLIED",
+        updatedAt: nowIso(),
+        lastError: undefined
+      }
+    };
+    await saveRequest(appliedRecord);
+    logServerEvent("info", "request.vector_sync.applied", {
+      requestId: appliedRecord.requestId,
+      requestStatus: appliedRecord.status,
+      vectorStatus,
+      trigger
+    });
+    return appliedRecord;
+  } catch (error) {
+    const failedRecord: StoredRequest = {
+      ...applyingRecord,
+      vectorSync: {
+        ...applyingRecord.vectorSync!,
+        state: "FAILED",
+        updatedAt: nowIso(),
+        lastError: stringifyError(error)
+      }
+    };
+    await saveRequest(failedRecord);
+    logServerFailure("request.vector_sync.failed", {
+      requestId: failedRecord.requestId,
+      requestStatus: failedRecord.status,
+      vectorStatus,
+      trigger,
+      error: failedRecord.vectorSync?.lastError
+    });
+    return failedRecord;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function ensureEarlierTerminalVectorSyncApplied(nextQueued: StoredRequest): Promise<boolean> {
+  if (!resolveRequestVectorSyncEnabled()) {
+    return true;
+  }
+
+  const records = await listRequests();
+  const blockers = records
+    .filter((record) => record.requestId !== nextQueued.requestId)
+    .filter((record) => record.createdAt.localeCompare(nextQueued.createdAt) <= 0)
+    .filter((record) => isVectorSyncGateStatus(record.status))
+    .filter((record) => !isVectorSyncAppliedForStatus(record, record.status))
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+  for (const blocker of blockers) {
+    const synced = await syncRequestVectorStatus(blocker, "queue_gate_before_next_verify");
+    if (!isVectorSyncAppliedForStatus(synced, synced.status)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+const CONFLICT_STOPWORDS = new Set([
+  "the",
+  "and",
+  "for",
+  "with",
+  "from",
+  "that",
+  "this",
+  "will",
+  "would",
+  "should",
+  "could",
+  "market",
+  "prediction",
+  "resolve",
+  "resolution",
+  "criteria",
+  "before",
+  "after",
+  "over",
+  "under",
+  "than",
+  "into",
+  "about",
+  "what",
+  "when",
+  "where",
+  "which",
+  "who",
+  "why",
+  "how"
+]);
+
+function normalizeMarketText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractDomainList(urls: string[]): string[] {
+  const domains = urls
+    .map((value) => {
+      try {
+        return new URL(value).hostname.trim().toLowerCase();
+      } catch {
+        return "";
+      }
+    })
+    .filter(Boolean);
+  return Array.from(new Set(domains)).sort((a, b) => a.localeCompare(b));
+}
+
+function buildRequestDedupeKey(input: MarketRequestInput): string {
+  return hashObject({
+    question: normalizeMarketText(input.question),
+    description: normalizeMarketText(input.description),
+    resolutionCriteria: normalizeMarketText(input.resolutionCriteria),
+    sourceDomains: extractDomainList(input.sourceUrls)
+  });
+}
+
+function buildRequestConflictKey(input: MarketRequestInput): string {
+  const normalized = normalizeMarketText(`${input.question} ${input.resolutionCriteria}`);
+  const tokens = normalized
+    .split(" ")
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3 && !CONFLICT_STOPWORDS.has(token) && !/^\d+$/.test(token));
+  const stableTokens = Array.from(new Set(tokens)).sort((a, b) => a.localeCompare(b)).slice(0, 18);
+  return hashObject({
+    topicTokens: stableTokens
+  });
+}
+
+function computeHeuristicQueuePriority(input: MarketRequestInput): number {
+  const base = 100;
+  const sourceBoost = Math.min(input.sourceUrls.length * 5, 25);
+  const question = input.question.toLowerCase();
+  const description = input.description.toLowerCase();
+  const urgentBoost = /\b(urgent|breaking|asap|immediately)\b/.test(`${question} ${description}`) ? 30 : 0;
+  const explicitDateBoost = /\b(20\d{2})\b/.test(question) ? 10 : 0;
+  const score = base + sourceBoost + urgentBoost + explicitDateBoost;
+  return Math.max(1, Math.min(score, 1000));
+}
+
+function isActiveRequestStatusForScreening(status: RequestStatus): boolean {
+  return status === "PENDING" || status === "RUNNING" || status === "FINALIZED";
+}
+
+function isRejectedRequestStatus(status: RequestStatus): boolean {
+  return status === "REJECTED_DUPLICATE" || status === "REJECTED_CONFLICT";
+}
+
+interface RequestQueueScreeningResult {
+  decision: "allow" | "reject_duplicate" | "reject_conflict";
+  reason?: string;
+  queuePriority: number;
+  dedupeKey: string;
+  conflictKey: string;
+  source: "heuristic" | "screening_service" | "heuristic+screening_service";
+}
+
+interface RequestScreeningServiceDecision {
+  decision?: "allow" | "reject_duplicate" | "reject_conflict";
+  reason?: string;
+  queuePriority?: number;
+}
+
+function sanitizeScreeningServiceDecision(value: unknown): RequestScreeningServiceDecision | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const decisionRaw = typeof record.decision === "string" ? record.decision.trim().toLowerCase() : "";
+  const decision =
+    decisionRaw === "allow" || decisionRaw === "reject_duplicate" || decisionRaw === "reject_conflict"
+      ? decisionRaw
+      : undefined;
+  const reason = typeof record.reason === "string" && record.reason.trim() ? record.reason.trim() : undefined;
+  const priorityRaw = Number(record.queuePriority);
+  const queuePriority = Number.isFinite(priorityRaw) && priorityRaw >= 1 && priorityRaw <= 1000 ? Math.floor(priorityRaw) : undefined;
+  if (!decision && !reason && queuePriority === undefined) {
+    return null;
+  }
+  return {
+    decision,
+    reason,
+    queuePriority
+  };
+}
+
+async function callRequestScreeningService(input: {
+  candidate: MarketRequestInput;
+  existing: StoredRequest[];
+  dedupeKey: string;
+  conflictKey: string;
+  provisionalDecision: "allow" | "reject_conflict";
+  provisionalReason?: string;
+}): Promise<RequestScreeningServiceDecision | null> {
+  const url = resolveRequestScreeningServiceUrl();
+  if (!url) {
+    return null;
+  }
+
+  const timeoutController = new AbortController();
+  const timeoutId = setTimeout(() => timeoutController.abort(), resolveRequestScreeningServiceTimeoutMs());
+  try {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json"
+    };
+    const token = process.env.REQUEST_SCREENING_HTTP_AUTH_TOKEN?.trim();
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        candidate: input.candidate,
+        candidateKeys: {
+          dedupeKey: input.dedupeKey,
+          conflictKey: input.conflictKey
+        },
+        existing: input.existing
+          .filter((record) => isActiveRequestStatusForScreening(record.status))
+          .slice(0, 50)
+          .map((record) => ({
+            requestId: record.requestId,
+            status: record.status,
+            question: record.input.question,
+            description: record.input.description,
+            sourceUrls: record.input.sourceUrls,
+            resolutionCriteria: record.input.resolutionCriteria,
+            submitterAddress: record.input.submitterAddress,
+            dedupeKey: buildRequestDedupeKey(record.input),
+            conflictKey: buildRequestConflictKey(record.input)
+          })),
+        provisionalDecision: input.provisionalDecision,
+        provisionalReason: input.provisionalReason
+      }),
+      signal: timeoutController.signal
+    });
+    if (!response.ok) {
+      return null;
+    }
+    const parsed = (await response.json()) as unknown;
+    return sanitizeScreeningServiceDecision(parsed);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function evaluateRequestQueueScreening(input: {
+  candidate: MarketRequestInput;
+  existing: StoredRequest[];
+  selfRequestId?: string;
+}): Promise<RequestQueueScreeningResult> {
+  const dedupeKey = buildRequestDedupeKey(input.candidate);
+  const conflictKey = buildRequestConflictKey(input.candidate);
+  const relevantRecords = input.existing.filter(
+    (record) => record.requestId !== input.selfRequestId && isActiveRequestStatusForScreening(record.status)
+  );
+
+  const duplicate = relevantRecords.find((record) => buildRequestDedupeKey(record.input) === dedupeKey);
+  if (duplicate) {
+    return {
+      decision: "reject_duplicate",
+      reason: `duplicate_of_request:${duplicate.requestId}`,
+      queuePriority: computeHeuristicQueuePriority(input.candidate),
+      dedupeKey,
+      conflictKey,
+      source: "heuristic"
+    };
+  }
+
+  const conflicting = relevantRecords.find((record) => {
+    const recordConflictKey = buildRequestConflictKey(record.input);
+    if (recordConflictKey !== conflictKey) {
+      return false;
+    }
+    const recordDedupeKey = buildRequestDedupeKey(record.input);
+    return recordDedupeKey !== dedupeKey;
+  });
+
+  const rejectConflictEnabled = resolveRequestRejectConflictEnabled();
+  const provisionalDecision: "allow" | "reject_conflict" =
+    conflicting && rejectConflictEnabled ? "reject_conflict" : "allow";
+  const provisionalReason =
+    conflicting && rejectConflictEnabled ? `conflict_with_request:${conflicting.requestId}` : undefined;
+  let queuePriority = computeHeuristicQueuePriority(input.candidate);
+  let decision: RequestQueueScreeningResult["decision"] = provisionalDecision;
+  let reason = provisionalReason;
+  let source: RequestQueueScreeningResult["source"] = "heuristic";
+
+  const externalDecision = await callRequestScreeningService({
+    candidate: input.candidate,
+    existing: relevantRecords,
+    dedupeKey,
+    conflictKey,
+    provisionalDecision,
+    provisionalReason
+  });
+  if (externalDecision) {
+    if (externalDecision.queuePriority !== undefined) {
+      queuePriority = externalDecision.queuePriority;
+    }
+    if (
+      externalDecision.decision === "allow" ||
+      externalDecision.decision === "reject_conflict" ||
+      externalDecision.decision === "reject_duplicate"
+    ) {
+      decision = externalDecision.decision;
+    }
+    if (externalDecision.reason) {
+      reason = externalDecision.reason;
+    }
+    source = source === "heuristic" ? "heuristic+screening_service" : "screening_service";
+  }
+
+  return {
+    decision,
+    reason,
+    queuePriority,
+    dedupeKey,
+    conflictKey,
+    source
+  };
+}
+
+function sortQueuedRequests(records: StoredRequest[]): StoredRequest[] {
+  return [...records].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+function resolveRequestAutoVerifyEnabled(): boolean {
+  return parseBooleanEnv(process.env.REQUEST_AUTO_VERIFY_ENABLED, true);
+}
+
+function pickNextQueuedRequest(records: StoredRequest[]): StoredRequest | null {
+  const queued = sortQueuedRequests(records.filter((record) => record.status === "PENDING"));
+  return queued[0] ?? null;
+}
+
+let requestQueueProcessorRunning = false;
+let requestQueueProcessorScheduled = false;
+
+function scheduleRequestQueueProcessor(reason: string): void {
+  if (!resolveRequestAutoVerifyEnabled()) {
+    return;
+  }
+  if (requestQueueProcessorRunning || requestQueueProcessorScheduled) {
+    return;
+  }
+  requestQueueProcessorScheduled = true;
+  setTimeout(() => {
+    requestQueueProcessorScheduled = false;
+    void processQueuedRequests(reason);
+  }, 0);
+}
+
+async function processQueuedRequests(reason: string): Promise<void> {
+  if (!resolveRequestAutoVerifyEnabled()) {
+    return;
+  }
+  if (requestQueueProcessorRunning) {
+    return;
+  }
+
+  requestQueueProcessorRunning = true;
+  let vectorSyncBlocked = false;
+  logServerEvent("info", "request.queue.processor.start", { reason });
+  try {
+    while (true) {
+      const all = await listRequests();
+      const queued = pickNextQueuedRequest(all);
+      if (!queued) {
+        break;
+      }
+
+      const fresh = await getRequest(queued.requestId);
+      if (!fresh || fresh.status !== "PENDING") {
+        continue;
+      }
+      const traceId = buildRequestRunTraceId(fresh.requestId, fresh.runAttempts + 1);
+
+      const gateReady = await ensureEarlierTerminalVectorSyncApplied(fresh);
+      if (!gateReady) {
+        vectorSyncBlocked = true;
+        logServerFailure("request.queue.processor.blocked_vector_sync", {
+          requestId: fresh.requestId,
+          traceId
+        });
+        break;
+      }
+
+      const screened = await screenPendingRequestBeforeRun(fresh, traceId);
+      if (screened.rejected || screened.record.status !== "PENDING") {
+        continue;
+      }
+
+      if (!screened.record.paymentReceipt) {
+        const failedRecord: StoredRequest = {
+          ...screened.record,
+          status: "FAILED_ONCHAIN_SUBMISSION",
+          updatedAt: nowIso(),
+          lastError: "auto_queue_missing_payment_receipt"
+        };
+        await saveRequest(failedRecord);
+        await syncRequestVectorStatus(failedRecord, "queue_missing_payment_receipt");
+        logServerFailure("request.queue.processor.failed_missing_payment_receipt", {
+          requestId: failedRecord.requestId,
+          traceId
+        });
+        continue;
+      }
+
+      const internalReq = new Request(
+        `http://internal.local/api/requests/${encodeURIComponent(screened.record.requestId)}/run-verification`,
+        { method: "POST" }
+      );
+      await executeVerificationForRecord(internalReq, screened.record, {
+        paymentResource: "/api/requests",
+        paymentPrice: resolveRequestVerificationPrice(),
+        paymentReceipt: screened.record.paymentReceipt
+      });
+    }
+  } catch (error) {
+    logServerFailure("request.queue.processor.exception", {
+      error: stringifyError(error)
+    });
+  } finally {
+    requestQueueProcessorRunning = false;
+    try {
+      const remaining = await listRequests();
+      if (remaining.some((record) => record.status === "PENDING")) {
+        if (vectorSyncBlocked && resolveRequestVectorSyncBlockOnFailure()) {
+          setTimeout(() => {
+            scheduleRequestQueueProcessor("vector_sync_retry_after_block");
+          }, 10_000);
+        } else {
+          scheduleRequestQueueProcessor("pending_remaining_after_drain");
+        }
+      }
+    } catch (error) {
+      logServerFailure("request.queue.processor.list_remaining_failed", {
+        error: stringifyError(error)
+      });
+    }
+  }
 }
 
 function resolveNodeRegistrationPrice(): string {
@@ -661,6 +1300,55 @@ async function handleGetRequest(requestId: string): Promise<Response> {
   });
 }
 
+async function screenPendingRequestBeforeRun(
+  existing: StoredRequest,
+  traceId?: string
+): Promise<{ record: StoredRequest; rejected: boolean }> {
+  if (existing.status !== "PENDING") {
+    return { record: existing, rejected: false };
+  }
+
+  const screening = await evaluateRequestQueueScreening({
+    candidate: existing.input,
+    existing: await listRequests(),
+    selfRequestId: existing.requestId
+  });
+  const now = nowIso();
+  const screenedRecord: StoredRequest = {
+    ...existing,
+    queuePriority: screening.queuePriority,
+    queueDecision: {
+      ...screening,
+      evaluatedAt: now
+    },
+    updatedAt: now
+  };
+
+  if (screening.decision === "reject_duplicate" || screening.decision === "reject_conflict") {
+    const rejectedStatus: RequestStatus =
+      screening.decision === "reject_duplicate" ? "REJECTED_DUPLICATE" : "REJECTED_CONFLICT";
+    const rejectedRecord: StoredRequest = {
+      ...screenedRecord,
+      status: rejectedStatus,
+      lastError: screening.reason ?? screening.decision
+    };
+    await saveRequest(rejectedRecord);
+    await syncRequestVectorStatus(rejectedRecord, "screening_rejected_before_verify");
+    if (traceId) {
+      logServerFailure("request.run.screening_rejected", {
+        traceId,
+        requestId: rejectedRecord.requestId,
+        status: rejectedRecord.status,
+        reason: rejectedRecord.lastError
+      });
+    }
+    return { record: rejectedRecord, rejected: true };
+  }
+
+  await saveRequest(screenedRecord);
+  return { record: screenedRecord, rejected: false };
+}
+
 async function executeVerificationForRecord(
   req: Request,
   existing: StoredRequest,
@@ -670,7 +1358,10 @@ async function executeVerificationForRecord(
     paymentReceipt?: StoredRequest["paymentReceipt"];
   }
 ): Promise<Response> {
-  if (existing.runAttempts >= MAX_RUN_ATTEMPTS) {
+  const latest = await getRequest(existing.requestId);
+  const current = latest ?? existing;
+
+  if (current.runAttempts >= MAX_RUN_ATTEMPTS) {
     return jsonResponse(
       {
         ok: false,
@@ -681,22 +1372,22 @@ async function executeVerificationForRecord(
     );
   }
 
-  if (existing.status === "FINALIZED") {
+  if (current.status === "FINALIZED") {
     return jsonResponse({ ok: false, error: "already_finalized" }, 409);
   }
 
-  if (existing.status === "RUNNING") {
+  if (current.status === "RUNNING") {
     return jsonResponse({ ok: false, error: "request_already_running" }, 409);
   }
 
-  const requestId = existing.requestId;
-  const runAttempt = existing.runAttempts + 1;
+  const requestId = current.requestId;
+  const runAttempt = current.runAttempts + 1;
   const traceId = buildRequestRunTraceId(requestId, runAttempt);
   logServerEvent("info", "request.run.start", {
     traceId,
     requestId,
     runAttempt,
-    submitterAddress: existing.input.submitterAddress
+    submitterAddress: current.input.submitterAddress
   });
 
   const paymentResult =
@@ -708,7 +1399,7 @@ async function executeVerificationForRecord(
       : await enforceX402Payment(req, {
           resource: options?.paymentResource ?? `/api/requests/${requestId}/run-verification`,
           price: options?.paymentPrice ?? resolveRequestVerificationPrice(),
-          walletAddress: existing.input.submitterAddress
+          walletAddress: current.input.submitterAddress
         });
 
   if (!paymentResult.ok || !paymentResult.receipt) {
@@ -764,7 +1455,7 @@ async function executeVerificationForRecord(
 
   if (requireRegisteredNodes && match.selectedNodes.length < 3) {
     const failedRecord: StoredRequest = {
-      ...existing,
+      ...current,
       runAttempts: runAttempt,
       status: "FAILED_NO_QUORUM",
       activeNodes: match.selectedNodes,
@@ -775,6 +1466,7 @@ async function executeVerificationForRecord(
     };
 
     await saveRequest(failedRecord);
+    await syncRequestVectorStatus(failedRecord, "verification_failed_insufficient_registered_nodes");
     logServerFailure("request.run.failed", {
       traceId,
       requestId,
@@ -797,7 +1489,7 @@ async function executeVerificationForRecord(
 
   if (match.runtimeNodes.length < 3) {
     const failedRecord: StoredRequest = {
-      ...existing,
+      ...current,
       runAttempts: runAttempt,
       status: "FAILED_NO_QUORUM",
       activeNodes: match.selectedNodes,
@@ -807,6 +1499,7 @@ async function executeVerificationForRecord(
       lastError: "insufficient_runtime_nodes"
     };
     await saveRequest(failedRecord);
+    await syncRequestVectorStatus(failedRecord, "verification_failed_insufficient_runtime_nodes");
     logServerFailure("request.run.failed", {
       traceId,
       requestId,
@@ -828,7 +1521,7 @@ async function executeVerificationForRecord(
   }
 
   const runningRecord: StoredRequest = {
-    ...existing,
+    ...current,
     runAttempts: runAttempt,
     status: "RUNNING",
     activeNodes: match.selectedNodes,
@@ -839,6 +1532,14 @@ async function executeVerificationForRecord(
   };
 
   await saveRequest(runningRecord);
+  void syncRequestVectorStatus(runningRecord, "verification_started").catch((error) => {
+    logServerFailure("request.vector_sync.background_failed", {
+      requestId: runningRecord.requestId,
+      requestStatus: runningRecord.status,
+      trigger: "verification_started",
+      error: stringifyError(error)
+    });
+  });
   logServerEvent("info", "request.run.matched_nodes", {
     traceId,
     requestId,
@@ -851,7 +1552,7 @@ async function executeVerificationForRecord(
   try {
     const workflow = await runCreWorkflow({
       requestId,
-      input: existing.input,
+      input: current.input,
       activeNodes: match.selectedNodes,
       runtimeNodes: match.runtimeNodes,
       usedDefaultNodes: match.usedDefaultNodes,
@@ -896,19 +1597,20 @@ async function executeVerificationForRecord(
     };
 
     await saveRequest(finalized);
+    const finalizedWithVectorSync = await syncRequestVectorStatus(finalized, "verification_completed");
     if (finalStatus !== "FINALIZED") {
       logServerFailure("request.run.failed", {
         traceId,
         requestId,
         status: finalStatus,
-        reason: finalized.lastError ?? "workflow_non_finalized"
+        reason: finalizedWithVectorSync.lastError ?? "workflow_non_finalized"
       });
     }
 
     return jsonResponse({
       ok: true,
       data: {
-        ...buildRequestResponse(finalized),
+        ...buildRequestResponse(finalizedWithVectorSync),
         traceId,
         workflow: {
           traceId,
@@ -939,12 +1641,13 @@ async function executeVerificationForRecord(
       lastError: errorMessage
     };
     await saveRequest(failed);
+    const failedWithVectorSync = await syncRequestVectorStatus(failed, "verification_exception");
 
     return jsonResponse(
       {
         ok: false,
         error: "verification_failed",
-        detail: failed.lastError,
+        detail: errorMessage,
         traceId
       },
       500
@@ -969,57 +1672,92 @@ async function handleCreateRequest(req: Request): Promise<Response> {
       );
     }
 
-    const worldIdAuth = await requireWorldIdForWallet(req, validated.submitterAddress);
-    if (!worldIdAuth.ok) {
-      return jsonResponse(
-        {
-          ok: false,
-          error: worldIdAuth.error,
-          detail: worldIdAuth.detail
-        },
-        worldIdAuth.status
-      );
-    }
-
-    const paymentResult = await enforceX402Payment(req, {
-      resource: "/api/requests",
-      price: resolveRequestVerificationPrice(),
-      walletAddress: validated.submitterAddress
-    });
-    if (!paymentResult.ok) {
-      return paymentResult.response ?? jsonResponse({ ok: false, error: "payment_failed" }, 402);
-    }
-
-    const worldIdConsumeAuth = await requireWorldIdForWallet(req, validated.submitterAddress, { consumeToken: true });
-    if (!worldIdConsumeAuth.ok) {
-      return jsonResponse(
-        {
-          ok: false,
-          error: worldIdConsumeAuth.error,
-          detail: worldIdConsumeAuth.detail
-        },
-        worldIdConsumeAuth.status
-      );
+    if (resolveRequestRequireWorldIdOnCreate()) {
+      const worldIdConsumeAuth = await requireWorldIdForWallet(req, validated.submitterAddress, { consumeToken: true });
+      if (!worldIdConsumeAuth.ok) {
+        return jsonResponse(
+          {
+            ok: false,
+            error: worldIdConsumeAuth.error,
+            detail: worldIdConsumeAuth.detail
+          },
+          worldIdConsumeAuth.status
+        );
+      }
     }
 
     const timestamp = nowIso();
+    const screening = await evaluateRequestQueueScreening({
+      candidate: validated,
+      existing: await listRequests()
+    });
+    let status: RequestStatus = "PENDING";
+    if (screening.decision === "reject_duplicate") {
+      status = "REJECTED_DUPLICATE";
+    } else if (screening.decision === "reject_conflict") {
+      status = "REJECTED_CONFLICT";
+    }
+    const rejectedReason = screening.reason ?? screening.decision;
+    let paymentReceipt: StoredRequest["paymentReceipt"] | undefined;
+    if (status === "PENDING") {
+      const paymentResult = await enforceX402Payment(req, {
+        resource: "/api/requests",
+        price: resolveRequestVerificationPrice(),
+        walletAddress: validated.submitterAddress
+      });
+      if (!paymentResult.ok || !paymentResult.receipt) {
+        return paymentResult.response ?? jsonResponse({ ok: false, error: "payment_failed" }, 402);
+      }
+      paymentReceipt = paymentResult.receipt;
+    }
 
     const record: StoredRequest = {
       requestId: generateRequestId(),
       input: validated,
       createdAt: timestamp,
       updatedAt: timestamp,
-      status: "PENDING",
-      runAttempts: 0
+      status,
+      vectorSync: resolveRequestVectorSyncEnabled()
+        ? {
+            state: "PENDING",
+            vectorStatus: mapRequestStatusToVectorStatus(status),
+            attempts: 0,
+            updatedAt: timestamp
+          }
+        : undefined,
+      queuePriority: screening.queuePriority,
+      queueDecision: {
+        ...screening,
+        evaluatedAt: timestamp
+      },
+      runAttempts: 0,
+      paymentReceipt,
+      lastError:
+        status === "REJECTED_DUPLICATE" || status === "REJECTED_CONFLICT"
+          ? rejectedReason
+          : undefined
     };
 
     await saveRequest(record);
-
-    return executeVerificationForRecord(req, record, {
-      paymentResource: "/api/requests",
-      paymentPrice: resolveRequestVerificationPrice(),
-      paymentReceipt: paymentResult.receipt
+    void syncRequestVectorStatus(record, "request_created").catch((error) => {
+      logServerFailure("request.vector_sync.background_failed", {
+        requestId: record.requestId,
+        requestStatus: record.status,
+        trigger: "request_created",
+        error: stringifyError(error)
+      });
     });
+    if (record.status === "PENDING") {
+      scheduleRequestQueueProcessor("request_created");
+    }
+
+    return jsonResponse(
+      {
+        ok: true,
+        data: buildRequestResponse(record)
+      },
+      201
+    );
   } catch (error) {
     if (error instanceof ValidationError) {
       return jsonResponse(
@@ -1043,10 +1781,23 @@ async function handleCreateRequest(req: Request): Promise<Response> {
 }
 
 async function handleRunVerification(req: Request, requestId: string): Promise<Response> {
-  const existing = await getRequest(requestId);
+  let existing = await getRequest(requestId);
   if (!existing) {
     return jsonResponse({ ok: false, error: "request_not_found" }, 404);
   }
+
+  if (isRejectedRequestStatus(existing.status)) {
+    return jsonResponse(
+      {
+        ok: false,
+        error: "request_rejected",
+        detail: existing.lastError ?? existing.status,
+        data: buildRequestResponse(existing)
+      },
+      409
+    );
+  }
+
   const traceId = buildRequestRunTraceId(requestId, existing.runAttempts + 1);
 
   const walletAuth = await requireWalletRequestAuth(req, existing.input.submitterAddress);
@@ -1059,6 +1810,23 @@ async function handleRunVerification(req: Request, requestId: string): Promise<R
       },
       walletAuth.status
     );
+  }
+
+  if (existing.status === "PENDING") {
+    const screened = await screenPendingRequestBeforeRun(existing, traceId);
+    if (screened.rejected) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: "request_rejected_in_verify_stage",
+          detail: screened.record.lastError,
+          traceId,
+          data: buildRequestResponse(screened.record)
+        },
+        409
+      );
+    }
+    existing = screened.record;
   }
 
   const worldIdConsumeAuth = await requireWorldIdForWallet(req, existing.input.submitterAddress, { consumeToken: true });
@@ -1716,9 +2484,13 @@ async function router(req: Request): Promise<Response> {
     } else {
       items = await listRequests();
     }
+    const queued = sortQueuedRequests(items.filter((record) => record.status === "PENDING"));
+    const nonQueued = items
+      .filter((record) => record.status !== "PENDING")
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     return jsonResponse({
       ok: true,
-      data: items.map((record) => buildRequestResponse(record))
+      data: [...queued, ...nonQueued].map((record) => buildRequestResponse(record))
     });
   }
 
@@ -1823,3 +2595,5 @@ Bun.serve({
 logServerEvent("info", "startup.server.listening", {
   port: PORT
 });
+
+scheduleRequestQueueProcessor("startup");

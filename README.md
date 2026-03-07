@@ -1,6 +1,3 @@
-DEPLOY_PROFILE=don bash scripts/redeploy_registry.sh
-
-
 # CRE Prediction Market Demo
 
 End-to-end demo for multi-DON style verification:
@@ -16,12 +13,42 @@ End-to-end demo for multi-DON style verification:
 - `contracts/`: Solidity registry + Foundry deploy/test files
 - `orchestrator/`: API server + CRE workflow runner + consensus engine
 - `dapp/`: React UI for submit/result pages
+- `cre-operator-verifier/`: operator-managed CRE workflow scaffold (HTTP trigger + Confidential HTTP + Vault secret)
 
 ## Prerequisites
 
 - Bun 1.0+
 - Node.js 20+ (recommended for broader tool compatibility)
 - Foundry (`forge`, `cast`) for contract compile/deploy/test
+
+## Git Push safety checklist
+
+Before pushing to Git, confirm only placeholders are committed (no real keys/tokens/private keys).
+
+1. Check changed/untracked files.
+
+```bash
+git status --short
+```
+
+2. Scan added lines in your diff for sensitive variable names.
+
+```bash
+git diff -- . ':(exclude)package-lock.json' | rg -n '^\+.*(API_KEY|SECRET|TOKEN|PRIVATE_KEY|PASSWORD)'
+```
+
+3. Scan whole repo for common secret patterns.
+
+```bash
+rg -n --hidden -S --glob '!**/.git/**' --glob '!**/node_modules/**' \
+  'sk-[A-Za-z0-9]{20,}|xai-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN (RSA|EC|OPENSSH|PRIVATE KEY)-----'
+```
+
+Rules:
+
+- Keep real values only in local `.env` / secret manager.
+- Commit only `.env.example` placeholders.
+- If a real key was ever committed, rotate it immediately after removal.
 
 ## Quick start
 
@@ -91,37 +118,51 @@ Important:
 - Orchestrator must be publicly reachable over HTTPS from the browser.
 - Local worker endpoints like `http://127.0.0.1:19001` are not reachable from cloud runtime.
 
-### Orchestrator cloud deploy (Railway, Docker)
+### Railway deploy (orchestrator + vector + qdrant)
 
-Use this to get the `VITE_API_BASE_URL` value for Vercel.
+For vector similarity in production, deploy three services in one Railway project:
 
-1. Push this repository to GitHub (includes `orchestrator/Dockerfile`).
-2. Railway -> `New Project` -> `Deploy from GitHub repo`.
-3. Set **Root Directory** to `orchestrator`.
-4. Railway will build/run Docker automatically.
-5. In Railway `Variables`, set at least:
-   - `PORT=8787`
-   - `RPC_URL`
-   - `CHAIN_ID`
-   - `CONTRACT_ADDRESS`
-   - `COORDINATOR_PRIVATE_KEY`
-   - `USE_MOCK_ONCHAIN` (`false` for real finalize, `true` for mock demo)
-   - `WORLD_ID_APP_ID`
-   - `WORLD_ID_ACTION`
-   - `ASSUME_WORLD_ID_VERIFIED=false`
-   - `WORLD_ID_VERIFY_API_V4_BASE_URL=https://developer.world.org/api/v4/verify`
-   - `WORLD_ID_RP_ID=<rp_xxx (required for v4 payload verify)>`
-6. For cloud demo stability (no local worker dependency), also set:
-   - `DON_DISTRIBUTED_MODE=false`
-   - `NODE_ENDPOINT_VERIFY_ENABLED=false`
-   - `ALLOW_DEFAULT_NODES=true`
-   - `REQUIRE_REGISTERED_NODES=false`
-7. Confirm health endpoint:
-   - `https://<railway-service-url>/healthz`
+1. `orchestrator` service (from this repo)
+   - Root Directory: `orchestrator`
+   - Start command: `bun run dev`
+2. `vector-screening-service` service (same root directory)
+   - Root Directory: `orchestrator`
+   - Start command: `VECTOR_SCREENING_PORT=$PORT bun run vector-screening-service`
+3. `qdrant` service (Docker image)
+   - Source Image: `qdrant/qdrant:latest`
+   - Add variable: `QDRANT__SERVICE__API_KEY=<random-32+ chars>`
 
-Then set Vercel env:
+Orchestrator required variables (minimum):
 
-- `VITE_API_BASE_URL=https://<railway-service-url>`
+- Core chain/runtime: `RPC_URL`, `CHAIN_ID`, `CONTRACT_ADDRESS`, `COORDINATOR_PRIVATE_KEY`
+- World ID: `WORLD_ID_APP_ID`, `WORLD_ID_ACTION`, `WORLD_ID_RP_ID`
+- Screening bridge:
+  - `REQUEST_REJECT_CONFLICT_ENABLED=true`
+  - `REQUEST_VECTOR_SYNC_ENABLED=true`
+  - `REQUEST_SCREENING_HTTP_URL=http://vector-screening-service.railway.internal/screen`
+  - `REQUEST_VECTOR_SYNC_HTTP_URL=http://vector-screening-service.railway.internal/upsert`
+  - `REQUEST_SCREENING_HTTP_AUTH_TOKEN=<shared-token>`
+  - `REQUEST_VECTOR_SYNC_AUTH_TOKEN=<shared-token>`
+
+Vector-screening service required variables (minimum):
+
+- `VECTOR_SCREENING_STORE_BACKEND=qdrant`
+- `VECTOR_SCREENING_QDRANT_URL=http://qdrant.railway.internal:6333`
+- `VECTOR_SCREENING_QDRANT_API_KEY=<same as QDRANT__SERVICE__API_KEY>`
+- `VECTOR_SCREENING_QDRANT_COLLECTION=request_screening`
+- `VECTOR_SCREENING_EMBEDDING_MODE=openai`
+- `VECTOR_SCREENING_OPENAI_API_KEY=<openai key>`
+- `VECTOR_SCREENING_OPENAI_EMBEDDING_MODEL=text-embedding-3-small`
+- `VECTOR_SCREENING_AUTH_TOKEN=<shared-token>` (same token value as orchestrator `REQUEST_*_AUTH_TOKEN`)
+
+Frontend (Vercel) environment:
+
+- `VITE_API_BASE_URL=https://<orchestrator-public-domain>`
+
+Notes:
+
+- Qdrant is a separate DB service. Orchestrator/vector service do not embed Qdrant storage internally.
+- If you prefer one backend process, use `bun run dev:with-vector` for a single service that runs orchestrator+vector together; Qdrant still remains a separate service.
 
 ### 3) Contracts (Foundry)
 
@@ -244,6 +285,96 @@ For distributed DON-like operation, use:
 - `DON_ENDPOINT_BUNDLE_SIGNING_ENABLED=true`
 - `NODE_ENDPOINT_VERIFY_FALLBACK_MOCK=false`
 - `ALLOW_DEFAULT_NODES=false`
+
+### Worker confidential verifier mode (operator-managed API key)
+
+Use this when node operators must not hold the raw LLM API key.
+
+1. Operator runs an external verifier endpoint (recommended: CRE workflow HTTP trigger that uses Confidential HTTP + Vault secrets).
+2. Each worker calls that endpoint and signs the returned verdict.
+3. Workers only receive a scoped auth token, not the vendor API key.
+
+Worker env:
+
+- `RUNTIME_NODE_EXECUTION_MODE=cre_confidential_http`
+- `RUNTIME_NODE_CRE_VERIFY_URL=https://<operator-verifier-endpoint>/verify`
+- `RUNTIME_NODE_CRE_VERIFY_AUTH_TOKEN=<scoped-token>`
+- Optional per-node/family override maps:
+  - `RUNTIME_NODE_CRE_VERIFY_URL_MAP_JSON`
+  - `RUNTIME_NODE_CRE_VERIFY_AUTH_TOKEN_MAP_JSON`
+- Optional timeout:
+  - `RUNTIME_NODE_CRE_VERIFY_TIMEOUT_MS=12000`
+
+Expected verifier response shape (any one of these):
+
+- `{ "ok": true, "data": { "report": { "verdict": "PASS|FAIL", "confidence": 0..1, "rationale": "...", "evidenceSummary": "...", "generatedAt": "...", "reportHash": "0x..." } } }`
+- `{ "verdict": "PASS|FAIL", "confidence": 0..1, ... }`
+
+### CRE verifier adapter service
+
+If your upstream verifier is not directly synchronous, run an adapter service and point workers to it:
+
+- Start adapter:
+  - `cd orchestrator && bun run cre-verifier-adapter`
+- Set worker target:
+  - `RUNTIME_NODE_CRE_VERIFY_URL=http://127.0.0.1:9898/verify`
+- Adapter env:
+  - `CRE_ADAPTER_UPSTREAM_URL`
+  - `CRE_ADAPTER_AUTH_TOKEN` (optional; required by workers as bearer token)
+  - `CRE_ADAPTER_UPSTREAM_AUTH_TOKEN` (optional)
+  - `CRE_ADAPTER_TIMEOUT_MS`
+  - `CRE_ADAPTER_REQUIRE_SYNC_REPORT=true`
+
+### Request vector sync gate
+
+Queue processor can block the next FIFO request until earlier terminal requests are synced to vector DB:
+
+- `REQUEST_VECTOR_SYNC_ENABLED=true`
+- `REQUEST_VECTOR_SYNC_HTTP_URL=https://<vector-sync-service>/upsert`
+- `REQUEST_VECTOR_SYNC_AUTH_TOKEN=<token>`
+- `REQUEST_VECTOR_SYNC_TIMEOUT_MS=6000`
+- `REQUEST_VECTOR_SYNC_BLOCK_ON_FAILURE=true`
+
+Synced vector statuses:
+
+- `PENDING -> QUEUED`
+- `RUNNING -> VERIFYING`
+- `FINALIZED -> APPROVED_PENDING_OPEN`
+- `REJECTED_*`, `FAILED_* -> REJECTED`
+
+### Vector similarity screening test (end-to-end)
+
+For local testing, run one service that handles both vector upsert (`/upsert`) and similarity screening (`/screen`).
+This service supports:
+
+- `VECTOR_SCREENING_STORE_BACKEND=file` (JSON file store)
+- `VECTOR_SCREENING_STORE_BACKEND=qdrant` (real vector DB)
+
+1. Start Qdrant (if using vector DB backend).
+   - `docker run --rm -p 6333:6333 qdrant/qdrant`
+2. Start the vector screening service.
+   - `cd orchestrator`
+   - `VECTOR_SCREENING_STORE_BACKEND=qdrant VECTOR_SCREENING_OPENAI_API_KEY=<your-openai-key> bun run vector-screening-service`
+   - Single-service mode alternative: `bun run dev:with-vector` (runs orchestrator + vector service together)
+3. Configure orchestrator env (`orchestrator/.env`).
+   - `REQUEST_VECTOR_SYNC_ENABLED=true`
+   - `REQUEST_VECTOR_SYNC_HTTP_URL=http://127.0.0.1:9888/upsert`
+   - `REQUEST_SCREENING_HTTP_URL=http://127.0.0.1:9888/screen`
+   - `REQUEST_REJECT_CONFLICT_ENABLED=true`
+   - Optional auth (set same token on both sides):
+     - `REQUEST_VECTOR_SYNC_AUTH_TOKEN=<token>`
+     - `REQUEST_SCREENING_HTTP_AUTH_TOKEN=<token>`
+     - `VECTOR_SCREENING_AUTH_TOKEN=<token>`
+4. Run orchestrator and create two semantically similar requests.
+5. Verify the second request is rejected by similarity policy:
+   - `GET /api/requests/<requestId>`
+   - Expect:
+     - `status` is `REJECTED_CONFLICT` or `REJECTED_DUPLICATE`
+     - `queueDecision.reason` includes `vector_conflict_with_request:` or `vector_duplicate_of_request:`
+
+No-vector exception rule:
+
+- If there is no comparable indexed vector (e.g., first request, or previous index not yet upserted), screening returns `allow` immediately with reason `vector_screening_no_comparable_vectors`.
 
 ## Runtime artifacts
 

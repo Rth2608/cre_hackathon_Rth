@@ -17,8 +17,26 @@ export interface RequestRecord {
     | "PENDING"
     | "RUNNING"
     | "FINALIZED"
+    | "REJECTED_DUPLICATE"
+    | "REJECTED_CONFLICT"
     | "FAILED_NO_QUORUM"
     | "FAILED_ONCHAIN_SUBMISSION";
+  vectorSync?: {
+    state: "PENDING" | "APPLYING" | "APPLIED" | "FAILED";
+    vectorStatus: "QUEUED" | "VERIFYING" | "APPROVED_PENDING_OPEN" | "OPEN" | "REJECTED";
+    attempts: number;
+    updatedAt: string;
+    lastError?: string;
+  };
+  queuePriority?: number;
+  queueDecision?: {
+    decision: "allow" | "reject_duplicate" | "reject_conflict";
+    reason?: string;
+    dedupeKey: string;
+    conflictKey: string;
+    source: "heuristic" | "screening_service" | "heuristic+screening_service";
+    evaluatedAt: string;
+  };
   runAttempts: number;
   createdAt: string;
   updatedAt: string;
@@ -421,6 +439,8 @@ export async function runVerification(requestId: string): Promise<RequestRecord>
   const data = await requestJson<{
     requestId: string;
     status: RequestRecord["status"];
+    queuePriority?: number;
+    queueDecision?: RequestRecord["queueDecision"];
     runAttempts: number;
     createdAt: string;
     updatedAt: string;

@@ -5,6 +5,8 @@ export type RequestStatus =
   | "PENDING"
   | "RUNNING"
   | "FINALIZED"
+  | "REJECTED_DUPLICATE"
+  | "REJECTED_CONFLICT"
   | "FAILED_NO_QUORUM"
   | "FAILED_ONCHAIN_SUBMISSION";
 
@@ -190,6 +192,22 @@ export interface StoredRequest {
   input: MarketRequestInput;
   createdAt: string;
   status: RequestStatus;
+  vectorSync?: {
+    state: "PENDING" | "APPLYING" | "APPLIED" | "FAILED";
+    vectorStatus: "QUEUED" | "VERIFYING" | "APPROVED_PENDING_OPEN" | "OPEN" | "CLOSED" | "REJECTED";
+    attempts: number;
+    updatedAt: string;
+    lastError?: string;
+  };
+  queuePriority?: number;
+  queueDecision?: {
+    decision: "allow" | "reject_duplicate" | "reject_conflict";
+    reason?: string;
+    dedupeKey: string;
+    conflictKey: string;
+    source: "heuristic" | "screening_service" | "heuristic+screening_service";
+    evaluatedAt: string;
+  };
   runAttempts: number;
   nodeReports?: NodeReport[];
   signedNodeReports?: SignedNodeReport[];
