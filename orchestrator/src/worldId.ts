@@ -3,6 +3,7 @@ import { getAddress, keccak256, toUtf8Bytes } from "ethers";
 import { ensureDir, nowIso, readJsonFile, resolveProjectPath, writeJsonFileAtomic } from "./utils";
 
 const DEFAULT_WORLD_ID_VERIFY_API_V4_BASE = "https://developer.world.org/api/v4/verify";
+const DEFAULT_WORLD_ID_VERIFY_API_V2_BASE = "https://developer.worldcoin.org/api/v2/verify";
 const WORLD_ID_DB_PATH = resolveProjectPath("data", "world-id-sessions.json");
 
 interface WorldIdSessionDbSchema {
@@ -57,13 +58,25 @@ export interface WorldIdProofInput {
 }
 
 interface ParsedWorldIdV4ProofPayload {
+  mode: "v4";
   rawPayload: Record<string, unknown>;
   nullifierHash: string;
   verificationLevel?: string;
   action?: string;
 }
 
-type ParsedWorldIdProofPayload = ParsedWorldIdV4ProofPayload;
+interface ParsedWorldIdLegacyProofPayload {
+  mode: "v2";
+  rawPayload: Record<string, unknown>;
+  nullifierHash: string;
+  verificationLevel?: string;
+  action?: string;
+  signalHash?: string;
+  merkleRoot: string;
+  proof: string;
+}
+
+type ParsedWorldIdProofPayload = ParsedWorldIdV4ProofPayload | ParsedWorldIdLegacyProofPayload;
 
 export type WorldIdClientSource = "miniapp" | "external" | "manual";
 
@@ -211,6 +224,7 @@ function parseWorldIdV4Proof(rawInput: WorldIdProofInput): ParsedWorldIdV4ProofP
     toTrimmedString(firstResponse?.action);
 
   return {
+    mode: "v4",
     rawPayload: v4Record,
     nullifierHash: nullifierHash ?? "",
     verificationLevel,
@@ -218,12 +232,85 @@ function parseWorldIdV4Proof(rawInput: WorldIdProofInput): ParsedWorldIdV4ProofP
   };
 }
 
-function parseWorldIdProof(rawInput: WorldIdProofInput): ParsedWorldIdProofPayload {
-  const parsed = parseWorldIdV4Proof(rawInput);
-  if (!parsed) {
-    throw new Error("invalid_world_id_v4_payload");
+function parseWorldIdLegacyProof(rawInput: WorldIdProofInput): ParsedWorldIdLegacyProofPayload | null {
+  const rootRecord = toRecord(rawInput);
+  if (!rootRecord) {
+    return null;
   }
-  return parsed;
+
+  const nestedResult = toRecord(rootRecord.result);
+  const firstResponse = readFirstResponseRecord(rootRecord.responses);
+  const legacyCandidate = [rootRecord, nestedResult, firstResponse]
+    .filter((candidate): candidate is Record<string, unknown> => Boolean(candidate))
+    .find((candidate) => {
+      return Boolean(
+        toTrimmedString(candidate.proof) &&
+          (toTrimmedString(candidate.nullifier_hash) || toTrimmedString(candidate.nullifier)) &&
+          toTrimmedString(candidate.merkle_root)
+      );
+    });
+
+  if (!legacyCandidate) {
+    return null;
+  }
+
+  const proof = toTrimmedString(legacyCandidate.proof) ?? "";
+  const nullifierHash = normalizeHexStringMaybe(
+    toTrimmedString(legacyCandidate.nullifier_hash) ?? toTrimmedString(legacyCandidate.nullifier)
+  );
+  const merkleRoot = toTrimmedString(legacyCandidate.merkle_root) ?? "";
+  const verificationLevel =
+    toTrimmedString(legacyCandidate.verification_level) ??
+    toTrimmedString(legacyCandidate.credential_type) ??
+    toTrimmedString(rootRecord.verification_level);
+  const action = toTrimmedString(rootRecord.action) ?? toTrimmedString(legacyCandidate.action);
+  const signal = toTrimmedString(rootRecord.signal) ?? toTrimmedString(legacyCandidate.signal);
+  const signalHash = toTrimmedString(legacyCandidate.signal_hash) ?? toTrimmedString(rootRecord.signal_hash);
+
+  if (!proof || !nullifierHash || !merkleRoot) {
+    return null;
+  }
+
+  const rawPayload: Record<string, unknown> = {
+    merkle_root: merkleRoot,
+    nullifier_hash: nullifierHash,
+    proof
+  };
+  if (verificationLevel) {
+    rawPayload.verification_level = verificationLevel;
+  }
+  if (action) {
+    rawPayload.action = action;
+  }
+  if (signal) {
+    rawPayload.signal = signal;
+  }
+  if (signalHash) {
+    rawPayload.signal_hash = signalHash;
+  }
+
+  return {
+    mode: "v2",
+    rawPayload,
+    nullifierHash,
+    verificationLevel,
+    action,
+    signalHash,
+    merkleRoot,
+    proof
+  };
+}
+
+function parseWorldIdProof(rawInput: WorldIdProofInput): ParsedWorldIdProofPayload {
+  const parsedV4 = parseWorldIdV4Proof(rawInput);
+  if (parsedV4) {
+    return parsedV4;
+  }
+  const parsedLegacy = parseWorldIdLegacyProof(rawInput);
+  if (parsedLegacy) {
+    return parsedLegacy;
+  }
+  throw new Error("invalid_world_id_payload");
 }
 
 function assertParsedProofValid(payload: ParsedWorldIdProofPayload): void {
@@ -360,6 +447,10 @@ function resolveRequestedProfile(input: {
 
 function resolveWorldIdVerifyApiV4Base(): string {
   return (process.env.WORLD_ID_VERIFY_API_V4_BASE_URL?.trim() ?? DEFAULT_WORLD_ID_VERIFY_API_V4_BASE).replace(/\/$/, "");
+}
+
+function resolveWorldIdVerifyApiV2Base(): string {
+  return (process.env.WORLD_ID_VERIFY_API_V2_BASE_URL?.trim() ?? DEFAULT_WORLD_ID_VERIFY_API_V2_BASE).replace(/\/$/, "");
 }
 
 function resolveWorldIdVerifyV4RouteId(defaultAppId: string): string {
@@ -551,6 +642,46 @@ function buildWorldVerifyRequestBody(input: { proofPayload: ParsedWorldIdV4Proof
   return requestBody;
 }
 
+function buildWorldVerifyRequestBodyV2(input: {
+  proofPayload: ParsedWorldIdLegacyProofPayload;
+  action: string;
+}): Record<string, unknown> {
+  const raw = input.proofPayload.rawPayload;
+  const requestBody: Record<string, unknown> = {
+    merkle_root: toTrimmedString(raw.merkle_root) ?? input.proofPayload.merkleRoot,
+    nullifier_hash: toTrimmedString(raw.nullifier_hash) ?? input.proofPayload.nullifierHash,
+    proof: toTrimmedString(raw.proof) ?? input.proofPayload.proof,
+    action: toTrimmedString(raw.action) ?? input.action
+  };
+
+  const verificationLevel = toTrimmedString(raw.verification_level) ?? input.proofPayload.verificationLevel;
+  if (verificationLevel) {
+    requestBody.verification_level = verificationLevel;
+  }
+
+  const signalHash = toTrimmedString(raw.signal_hash) ?? input.proofPayload.signalHash;
+  if (signalHash) {
+    requestBody.signal_hash = signalHash;
+  } else {
+    const rawSignal = toTrimmedString(raw.signal);
+    if (rawSignal) {
+      requestBody.signal_hash = hashSignalToField(rawSignal);
+    }
+  }
+
+  const maxAgeRaw = raw.max_age;
+  if (typeof maxAgeRaw === "number" && Number.isFinite(maxAgeRaw)) {
+    requestBody.max_age = Math.floor(maxAgeRaw);
+  } else if (typeof maxAgeRaw === "string" && maxAgeRaw.trim().length > 0) {
+    const parsed = Number.parseInt(maxAgeRaw.trim(), 10);
+    if (Number.isFinite(parsed)) {
+      requestBody.max_age = parsed;
+    }
+  }
+
+  return requestBody;
+}
+
 async function verifyWithWorldCloudV4(input: {
   routeId: string;
   proofPayload: ParsedWorldIdV4ProofPayload;
@@ -562,10 +693,34 @@ async function verifyWithWorldCloudV4(input: {
   });
 }
 
+async function verifyWithWorldCloudV2(input: {
+  appId: string;
+  action: string;
+  proofPayload: ParsedWorldIdLegacyProofPayload;
+}): Promise<VerifyApiResult> {
+  const verifyUrl = `${resolveWorldIdVerifyApiV2Base()}/${input.appId}`;
+  return runWorldVerifyRequest({
+    verifyUrl,
+    requestBody: buildWorldVerifyRequestBodyV2({
+      proofPayload: input.proofPayload,
+      action: input.action
+    })
+  });
+}
+
 async function verifyWithWorldCloud(input: {
   appId: string;
+  action: string;
   proofPayload: ParsedWorldIdProofPayload;
 }): Promise<VerifyApiResult> {
+  if (input.proofPayload.mode === "v2") {
+    return verifyWithWorldCloudV2({
+      appId: input.appId,
+      action: input.action,
+      proofPayload: input.proofPayload
+    });
+  }
+
   const v4RouteId = resolveWorldIdVerifyV4RouteId(input.appId);
   if (!v4RouteId) {
     return {
@@ -658,6 +813,7 @@ export async function issueWorldIdSessionFromProof(input: {
 
   const verifyResult = await verifyWithWorldCloud({
     appId: selectedProfile.appId,
+    action: selectedProfile.action,
     proofPayload: parsedProof
   });
   if (!verifyResult.ok) {

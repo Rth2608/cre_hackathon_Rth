@@ -256,24 +256,18 @@ function buildWorldProofFromIdKit(
     throw new Error("world_id_v4_payload_required: external_widget_returned_legacy_payload");
   }
 
-  const identifier = resolveWorldIdCredentialIdentifier(legacyPayload.verificationLevel);
-  return {
-    protocol_version: "3.0",
-    nonce: `idkit-${Date.now()}-${Math.random()}`,
+  const legacyProof: Record<string, unknown> = {
     action: input.action,
     signal: input.signal,
-    responses: [
-      {
-        identifier,
-        nullifier: legacyPayload.nullifierHash,
-        nullifier_hash: legacyPayload.nullifierHash,
-        merkle_root: legacyPayload.merkleRoot,
-        proof: legacyPayload.proof,
-        verification_level: legacyPayload.verificationLevel,
-        signal_hash: legacyPayload.signalHash
-      }
-    ]
+    merkle_root: legacyPayload.merkleRoot,
+    nullifier_hash: legacyPayload.nullifierHash,
+    proof: legacyPayload.proof,
+    verification_level: legacyPayload.verificationLevel
   };
+  if (legacyPayload.signalHash) {
+    legacyProof.signal_hash = legacyPayload.signalHash;
+  }
+  return legacyProof;
 }
 
 function readLegacyMiniKitProofPayload(
