@@ -2,73 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ConnectButton, useActiveAccount } from "thirdweb/react";
 import AppNav from "../components/AppNav";
-import {
-  ApiRequestError,
-  getReport,
-  getRequest,
-  runVerificationForWallet,
-  type RequestRecord,
-  type WorkflowStepLog,
-  type WorldIdSession
-} from "../lib/api";
+import { ApiRequestError, getRequest, runVerificationForWallet, type RequestRecord, type WorldIdSession } from "../lib/api";
 import { isThirdwebClientConfigured, thirdwebClient } from "../lib/thirdweb";
 import { clearWorldIdSession, loadWorldIdSession } from "../lib/worldId";
 import { worldChainSepoliaChain } from "../lib/worldChain";
 
-interface ReportPayload {
-  requestId: string;
-  nodeReports: Array<{
-    nodeId: string;
-    verdict: "PASS" | "FAIL";
-    confidence: number;
-    rationale: string;
-    evidenceSummary: string;
-    reportHash: string;
-    generatedAt: string;
-  }>;
-  nodeFailures?: Array<{ nodeId: string; reason: string }>;
-  consensus?: RequestRecord["consensus"];
-  onchainReceipt?: RequestRecord["onchainReceipt"];
-  generatedAt: string;
-}
-
 function scoreLabel(score?: number): string {
   if (typeof score !== "number") return "-";
   return `${(score * 100).toFixed(2)}%`;
-}
-
-function workflowStepLabel(step: WorkflowStepLog["step"]): string {
-  switch (step) {
-    case "validate_input":
-      return "Validate Input";
-    case "dispatch_nodes":
-      return "Dispatch Nodes";
-    case "collect_reports":
-      return "Collect Reports";
-    case "compute_consensus":
-      return "Compute Consensus";
-    case "persist_offchain_report":
-      return "Persist Off-chain Report";
-    case "submit_onchain":
-      return "Submit On-chain";
-    case "emit_run_summary":
-      return "Emit Run Summary";
-    default:
-      return step;
-  }
-}
-
-function workflowStepDuration(log: WorkflowStepLog): string {
-  const startedAtMs = Date.parse(log.startedAt);
-  const endedAtMs = Date.parse(log.endedAt);
-  if (!Number.isFinite(startedAtMs) || !Number.isFinite(endedAtMs)) {
-    return "-";
-  }
-  const deltaMs = Math.max(endedAtMs - startedAtMs, 0);
-  if (deltaMs < 1000) {
-    return `${deltaMs}ms`;
-  }
-  return `${(deltaMs / 1000).toFixed(2)}s`;
 }
 
 export default function ResultPage() {
@@ -77,34 +18,25 @@ export default function ResultPage() {
   const walletAddress = activeAccount?.address ?? "";
   const walletConnected = walletAddress.length > 0;
   const thirdwebConfigured = isThirdwebClientConfigured();
+
   const [request, setRequest] = useState<RequestRecord | null>(null);
-  const [report, setReport] = useState<ReportPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [runningVerification, setRunningVerification] = useState(false);
   const [worldIdSession, setWorldIdSession] = useState<WorldIdSession | null>(null);
   const [lastRunTraceId, setLastRunTraceId] = useState<string | null>(null);
-  const [lastRunStepLogs, setLastRunStepLogs] = useState<WorkflowStepLog[] | null>(null);
   const [traceCopied, setTraceCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const load = async () => {
-    if (!requestId) return;
+    if (!requestId) {
+      return;
+    }
 
     setLoading(true);
     setError(null);
-
     try {
-      const [reqData, reportData] = await Promise.allSettled([getRequest(requestId), getReport(requestId)]);
-
-      if (reqData.status === "fulfilled") {
-        setRequest(reqData.value);
-      }
-
-      if (reportData.status === "fulfilled") {
-        setReport(reportData.value as ReportPayload);
-      } else {
-        setReport(null);
-      }
+      const reqData = await getRequest(requestId);
+      setRequest(reqData);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -153,12 +85,6 @@ export default function ResultPage() {
   const canRunVerification = runVerificationReason === "Ready";
   const derivedTraceId = requestId && request && request.runAttempts > 0 ? `${requestId}:run:${request.runAttempts}` : null;
   const effectiveTraceId = lastRunTraceId || derivedTraceId;
-  const workflowStepLogs =
-    request?.workflowStepLogs && request.workflowStepLogs.length > 0
-      ? request.workflowStepLogs
-      : lastRunStepLogs && lastRunStepLogs.length > 0
-        ? lastRunStepLogs
-        : null;
 
   const onCopyTraceId = async () => {
     if (!effectiveTraceId) {
@@ -198,10 +124,7 @@ export default function ResultPage() {
       if (traceId) {
         setLastRunTraceId(traceId);
       }
-      if (updated.workflow?.stepLogs && updated.workflow.stepLogs.length > 0) {
-        setLastRunStepLogs(updated.workflow.stepLogs);
-      }
-      // Server consumes session token per run-verification request.
+
       clearWorldIdSession(walletAddress);
       setWorldIdSession(null);
       setRequest(updated);
@@ -277,7 +200,9 @@ export default function ResultPage() {
                   className={`status-badge ${
                     request.status === "FINALIZED"
                       ? "ok"
-                      : request.status === "REJECTED_DUPLICATE" || request.status === "REJECTED_CONFLICT" || request.status.startsWith("FAILED_")
+                      : request.status === "REJECTED_DUPLICATE" ||
+                          request.status === "REJECTED_CONFLICT" ||
+                          request.status.startsWith("FAILED_")
                         ? "bad"
                         : "warn"
                   }`}
@@ -371,142 +296,6 @@ export default function ResultPage() {
               </p>
               <p className="mono">{request.consensus?.finalReportHash || "No report hash yet"}</p>
             </article>
-          </section>
-        )}
-
-        {request?.onchainReceipt && (
-          <section className="status-card">
-            <h2>On-chain Receipt</h2>
-            <p>
-              <strong>txHash:</strong> <span className="mono">{request.onchainReceipt.txHash}</span>
-            </p>
-            <p>
-              <strong>Block:</strong> {request.onchainReceipt.blockNumber} | <strong>Gas:</strong>{" "}
-              {request.onchainReceipt.gasUsed}
-            </p>
-            <p>
-              <strong>Execution:</strong>{" "}
-              <span className={`status-badge ${request.onchainReceipt.simulated ? "warn" : "ok"}`}>
-                {request.onchainReceipt.simulated ? "Simulated" : "Live"}
-              </span>
-            </p>
-            {request.onchainReceipt.explorerUrl && (
-              <p>
-                <a href={request.onchainReceipt.explorerUrl} target="_blank" rel="noreferrer" className="text-link">
-                  Open Tenderly tx
-                </a>
-              </p>
-            )}
-          </section>
-        )}
-
-        {request?.paymentReceipt && (
-          <section className="status-card">
-            <h2>x402 Payment</h2>
-            <p>
-              <strong>Required:</strong> {request.paymentReceipt.required ? "Yes" : "No"}
-            </p>
-            <p>
-              <strong>Paid:</strong> {request.paymentReceipt.paid ? "Yes" : "No"}
-            </p>
-            <p>
-              <strong>Payer:</strong> <span className="mono">{request.paymentReceipt.payerAddress}</span>
-            </p>
-            <p>
-              <strong>Resource:</strong> {request.paymentReceipt.resource} | <strong>Price:</strong>{" "}
-              {request.paymentReceipt.price}
-            </p>
-            <p>
-              <strong>Payment Ref:</strong> <span className="mono">{request.paymentReceipt.paymentRef}</span>
-            </p>
-          </section>
-        )}
-
-        {request?.activeNodes && request.activeNodes.length > 0 && (
-          <section className="status-card">
-            <h2>Active Nodes Used</h2>
-            <div className="request-table">
-              <div className="request-head">
-                <span>Node ID</span>
-                <span>Models / Stake</span>
-                <span>Participation</span>
-                <span>Wallet</span>
-                <span>Updated</span>
-              </div>
-              {request.activeNodes.map((node) => (
-                <div key={node.registrationId} className="request-row">
-                  <span className="mono small">{node.nodeId}</span>
-                  <span>
-                    {node.selectedModelFamilies.join(", ")} / stake={node.stakeAmount}
-                  </span>
-                  <span className={`status-badge ${node.participationEnabled ? "ok" : "warn"}`}>
-                    {node.participationEnabled ? "ENABLED" : "PAUSED"}
-                  </span>
-                  <span className="mono small">{node.walletAddress}</span>
-                  <span>{new Date(node.updatedAt).toLocaleString()}</span>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
-
-        {workflowStepLogs && (
-          <section className="status-card">
-            <h2>Workflow Steps</h2>
-            <div className="workflow-step-list">
-              {workflowStepLogs.map((stepLog, index) => (
-                <article key={`${stepLog.step}:${stepLog.startedAt}:${index}`} className="workflow-step-item">
-                  <div className="inline-row between">
-                    <h3>{workflowStepLabel(stepLog.step)}</h3>
-                    <span
-                      className={`status-badge ${
-                        stepLog.status === "ok" ? "ok" : stepLog.status === "failed" ? "bad" : "warn"
-                      }`}
-                    >
-                      {stepLog.status}
-                    </span>
-                  </div>
-                  <p className="mono small">
-                    {new Date(stepLog.startedAt).toLocaleString()} - {new Date(stepLog.endedAt).toLocaleString()} (
-                    {workflowStepDuration(stepLog)})
-                  </p>
-                  {stepLog.detail && <p>{stepLog.detail}</p>}
-                </article>
-              ))}
-            </div>
-          </section>
-        )}
-
-        {report && (
-          <section className="status-card">
-            <h2>Node Reports</h2>
-            <div className="report-list">
-              {report.nodeReports.map((node) => (
-                <article key={node.nodeId} className="report-item">
-                  <div className="inline-row between">
-                    <h3>{node.nodeId.toUpperCase()}</h3>
-                    <span className={node.verdict === "PASS" ? "pill pass" : "pill fail"}>{node.verdict}</span>
-                  </div>
-                  <p>
-                    <strong>Confidence:</strong> {(node.confidence * 100).toFixed(0)}%
-                  </p>
-                  <p>{node.rationale}</p>
-                  <p>{node.evidenceSummary}</p>
-                  <p className="mono small">{node.reportHash}</p>
-                </article>
-              ))}
-            </div>
-
-            {report.nodeFailures && report.nodeFailures.length > 0 && (
-              <article className="status-card muted">
-                <h3>Node Failures</h3>
-                {report.nodeFailures.map((failed) => (
-                  <p key={failed.nodeId}>
-                    {failed.nodeId}: {failed.reason}
-                  </p>
-                ))}
-              </article>
-            )}
           </section>
         )}
       </main>

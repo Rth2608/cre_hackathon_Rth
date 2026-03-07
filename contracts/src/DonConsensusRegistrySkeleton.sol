@@ -26,6 +26,10 @@ contract DonConsensusRegistrySkeleton {
     error LifecycleAlreadyRecorded(bytes32 lifecycleId);
     error InvalidPorInputs();
     error PorProofAlreadyRecorded(uint32 marketId, uint64 epoch);
+    error InvalidRewardRecipient();
+    error NoPendingRewards(address operator);
+    error RewardTransferFailed();
+    error RewardWithdrawalExceedsAvailable(uint256 requested, uint256 available);
 
     bytes32 private constant EIP712_DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -92,12 +96,17 @@ contract DonConsensusRegistrySkeleton {
 
     address public owner;
     address public coordinator;
+    uint256 public rewardPerResponderWei;
+    uint256 public leaderBonusWei;
+    bool public rewardsEnabled;
+    uint256 public totalPendingRewardsWei;
 
     mapping(bytes32 => BundleRecord) private _bundleRecords;
     mapping(bytes32 => bool) private _lifecycleRecords;
     mapping(bytes32 => PorProofRecord) private _porProofs;
     mapping(uint32 => uint64) private _latestPorEpochByMarket;
     mapping(address => bool) public operatorAllowlist;
+    mapping(address => uint256) private _pendingRewardsWei;
 
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event CoordinatorUpdated(address indexed previousCoordinator, address indexed newCoordinator);
@@ -144,6 +153,12 @@ contract DonConsensusRegistrySkeleton {
         uint256 timestamp
     );
 
+    event RewardConfigUpdated(uint256 rewardPerResponderWei, uint256 leaderBonusWei, bool rewardsEnabled);
+    event RewardPoolFunded(address indexed sender, uint256 amount, uint256 balanceAfter);
+    event RewardAccrued(bytes32 indexed requestId, address indexed operator, uint256 amount, bool isLeader);
+    event RewardClaimed(address indexed operator, address indexed recipient, uint256 amount);
+    event RewardPoolWithdrawn(address indexed recipient, uint256 amount);
+
     constructor(address initialCoordinator) {
         if (initialCoordinator == address(0)) {
             revert InvalidCoordinator();
@@ -152,6 +167,10 @@ contract DonConsensusRegistrySkeleton {
         coordinator = initialCoordinator;
         emit OwnershipTransferred(address(0), owner);
         emit CoordinatorUpdated(address(0), initialCoordinator);
+    }
+
+    receive() external payable {
+        emit RewardPoolFunded(msg.sender, msg.value, address(this).balance);
     }
 
     modifier onlyCoordinator() {
@@ -213,12 +232,83 @@ contract DonConsensusRegistrySkeleton {
         }
     }
 
+    function setRewardConfig(uint256 newRewardPerResponderWei, uint256 newLeaderBonusWei, bool enabled) external onlyOwner {
+        rewardPerResponderWei = newRewardPerResponderWei;
+        leaderBonusWei = newLeaderBonusWei;
+        rewardsEnabled = enabled;
+        emit RewardConfigUpdated(newRewardPerResponderWei, newLeaderBonusWei, enabled);
+    }
+
+    function pendingRewardWei(address operator) external view returns (uint256) {
+        return _pendingRewardsWei[operator];
+    }
+
+    function availableRewardPoolWei() public view returns (uint256) {
+        uint256 balance = address(this).balance;
+        if (balance <= totalPendingRewardsWei) {
+            return 0;
+        }
+        return balance - totalPendingRewardsWei;
+    }
+
+    function claimRewards(address payable recipient) external {
+        if (recipient == address(0)) {
+            revert InvalidRewardRecipient();
+        }
+
+        uint256 amount = _pendingRewardsWei[msg.sender];
+        if (amount == 0) {
+            revert NoPendingRewards(msg.sender);
+        }
+
+        _pendingRewardsWei[msg.sender] = 0;
+        totalPendingRewardsWei -= amount;
+
+        (bool success, ) = recipient.call{value: amount}("");
+        if (!success) {
+            _pendingRewardsWei[msg.sender] = amount;
+            totalPendingRewardsWei += amount;
+            revert RewardTransferFailed();
+        }
+
+        emit RewardClaimed(msg.sender, recipient, amount);
+    }
+
+    function withdrawAvailableRewards(address payable recipient, uint256 amountWei) external onlyOwner {
+        if (recipient == address(0)) {
+            revert InvalidRewardRecipient();
+        }
+
+        uint256 available = availableRewardPoolWei();
+        if (amountWei > available) {
+            revert RewardWithdrawalExceedsAvailable(amountWei, available);
+        }
+
+        (bool success, ) = recipient.call{value: amountWei}("");
+        if (!success) {
+            revert RewardTransferFailed();
+        }
+
+        emit RewardPoolWithdrawn(recipient, amountWei);
+    }
+
     function finalizeWithBundle(bytes calldata encodedInput) external onlyCoordinator {
         FinalizeWithBundleInput memory input = abi.decode(encodedInput, (FinalizeWithBundleInput));
         _finalizeWithBundle(input);
     }
 
     function _finalizeWithBundle(FinalizeWithBundleInput memory input) internal {
+        _validateFinalizeInput(input);
+        _verifyLeaderSignature(input);
+        _verifyOperatorApprovals(input);
+
+        BundleRecord memory record = _toBundleRecord(input);
+        _bundleRecords[input.requestId] = record;
+        _accrueRewards(input.requestId, input.includedOperators, input.leader);
+        _emitVerificationBundleFinalized(record);
+    }
+
+    function _validateFinalizeInput(FinalizeWithBundleInput memory input) internal view {
         if (_bundleRecords[input.requestId].timestamp != 0) {
             revert AlreadyFinalized(input.requestId);
         }
@@ -250,7 +340,9 @@ contract DonConsensusRegistrySkeleton {
         if (input.leaderSignature.length == 0) {
             revert InvalidSignature();
         }
+    }
 
+    function _verifyLeaderSignature(FinalizeWithBundleInput memory input) internal view {
         bytes32 bundleStructHash = keccak256(
             abi.encode(
                 CONSENSUS_BUNDLE_TYPEHASH,
@@ -276,7 +368,9 @@ contract DonConsensusRegistrySkeleton {
         if (recoveredLeader != input.leader) {
             revert InvalidSignature();
         }
+    }
 
+    function _verifyOperatorApprovals(FinalizeWithBundleInput memory input) internal view {
         bytes32 operatorApprovalStructHash =
             keccak256(abi.encode(OPERATOR_APPROVAL_TYPEHASH, input.bundleHash, input.requestId, input.round));
         bytes32 operatorApprovalDigest = _hashTypedDataV4(operatorApprovalStructHash);
@@ -309,8 +403,10 @@ contract DonConsensusRegistrySkeleton {
         if (!leaderIncluded) {
             revert InvalidLeader();
         }
+    }
 
-        BundleRecord memory record = BundleRecord({
+    function _toBundleRecord(FinalizeWithBundleInput memory input) internal view returns (BundleRecord memory) {
+        return BundleRecord({
             requestId: input.requestId,
             requestHash: input.requestHash,
             round: input.round,
@@ -327,24 +423,24 @@ contract DonConsensusRegistrySkeleton {
             timestamp: block.timestamp,
             reportUri: input.reportUri
         });
+    }
 
-        _bundleRecords[input.requestId] = record;
-
+    function _emitVerificationBundleFinalized(BundleRecord memory record) internal {
         emit VerificationBundleFinalized(
-            input.requestId,
-            input.bundleHash,
-            input.verdict,
-            input.aggregateScoreBps,
-            input.responders,
-            input.round,
-            input.reportsMerkleRoot,
-            input.attestationRootHash,
-            input.promptTemplateHash,
-            input.consensusTimestamp,
-            input.leader,
-            msg.sender,
-            block.timestamp,
-            input.reportUri
+            record.requestId,
+            record.bundleHash,
+            record.verdict,
+            record.aggregateScoreBps,
+            record.responders,
+            record.round,
+            record.reportsMerkleRoot,
+            record.attestationRootHash,
+            record.promptTemplateHash,
+            record.consensusTimestamp,
+            record.leader,
+            record.coordinator,
+            record.timestamp,
+            record.reportUri
         );
     }
 
@@ -474,6 +570,33 @@ contract DonConsensusRegistrySkeleton {
 
     function _porKey(uint32 marketId, uint64 epoch) internal pure returns (bytes32) {
         return keccak256(abi.encode(marketId, epoch));
+    }
+
+    function _accrueRewards(bytes32 requestId, address[] memory includedOperators, address leader) internal {
+        if (!rewardsEnabled) {
+            return;
+        }
+
+        uint256 baseReward = rewardPerResponderWei;
+        uint256 leaderRewardBonus = leaderBonusWei;
+        if (baseReward == 0 && leaderRewardBonus == 0) {
+            return;
+        }
+
+        for (uint256 i = 0; i < includedOperators.length; i++) {
+            address operator = includedOperators[i];
+            bool isLeader = operator == leader;
+            uint256 reward = baseReward;
+            if (isLeader) {
+                reward += leaderRewardBonus;
+            }
+            if (reward == 0) {
+                continue;
+            }
+            _pendingRewardsWei[operator] += reward;
+            totalPendingRewardsWei += reward;
+            emit RewardAccrued(requestId, operator, reward, isLeader);
+        }
     }
 
     function _domainSeparatorV4() internal view returns (bytes32) {

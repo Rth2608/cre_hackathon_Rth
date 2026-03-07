@@ -8,6 +8,7 @@ interface Vm {
     function expectRevert(bytes calldata) external;
     function sign(uint256 privateKey, bytes32 digest) external returns (uint8 v, bytes32 r, bytes32 s);
     function addr(uint256 privateKey) external returns (address);
+    function deal(address who, uint256 newBalance) external;
 }
 
 address constant VM_ADDRESS = address(uint160(uint256(keccak256("hevm cheat code"))));
@@ -39,6 +40,8 @@ contract DonConsensusRegistrySkeletonTest {
     bytes32 private attestationRootHash = keccak256("attestation-root");
     bytes32 private promptTemplateHash = keccak256("prompt-template");
     uint64 private consensusTimestamp = 1_735_689_600;
+
+    receive() external payable {}
 
     function _testPrivateKey(string memory label) private pure returns (uint256) {
         uint256 raw = uint256(keccak256(abi.encodePacked("cre-don-test-key:", label)));
@@ -186,6 +189,76 @@ contract DonConsensusRegistrySkeletonTest {
         registry.recordPorProof(1, 1, 1_010_000_000, 955_000_000, keccak256("don-por-proof-2"), "por://epoch/1b");
     }
 
+    function testAccruesAndClaimsOperatorRewardsAfterBundleFinalization() external {
+        DonConsensusRegistrySkeleton registry = new DonConsensusRegistrySkeleton(coordinator);
+        _allowOperators(registry);
+        registry.setRewardConfig(0.1 ether, 0.02 ether, true);
+        _fundRegistry(address(registry), 1 ether);
+
+        (
+            address leader,
+            address[] memory operators,
+            bytes[] memory operatorSignatures,
+            bytes memory leaderSignature,
+            bytes32 bundleHash
+        ) = _buildBundleSignatures(registry);
+
+        VM.prank(coordinator);
+        registry.finalizeWithBundle(
+            _encodeFinalizeInput(leader, operators, operatorSignatures, leaderSignature, bundleHash, "report://don/1")
+        );
+
+        address operator2 = operators[1];
+        address operator3 = operators[2];
+        assertEqUint(registry.pendingRewardWei(leader), 0.12 ether, "leader reward mismatch");
+        assertEqUint(registry.pendingRewardWei(operator2), 0.1 ether, "operator2 reward mismatch");
+        assertEqUint(registry.pendingRewardWei(operator3), 0.1 ether, "operator3 reward mismatch");
+        assertEqUint(registry.totalPendingRewardsWei(), 0.32 ether, "total pending reward mismatch");
+
+        uint256 operator2BalanceBefore = operator2.balance;
+        VM.prank(operator2);
+        registry.claimRewards(payable(operator2));
+        assertEqUint(registry.pendingRewardWei(operator2), 0, "operator2 pending reward should be zero after claim");
+        assertEqUint(operator2.balance, operator2BalanceBefore + 0.1 ether, "operator2 claim payout mismatch");
+
+        VM.prank(operator2);
+        VM.expectRevert(abi.encodeWithSelector(DonConsensusRegistrySkeleton.NoPendingRewards.selector, operator2));
+        registry.claimRewards(payable(operator2));
+    }
+
+    function testOwnerCanWithdrawOnlyAvailableRewardPool() external {
+        DonConsensusRegistrySkeleton registry = new DonConsensusRegistrySkeleton(coordinator);
+        _allowOperators(registry);
+        registry.setRewardConfig(0.1 ether, 0.02 ether, true);
+        _fundRegistry(address(registry), 1 ether);
+
+        (
+            address leader,
+            address[] memory operators,
+            bytes[] memory operatorSignatures,
+            bytes memory leaderSignature,
+            bytes32 bundleHash
+        ) = _buildBundleSignatures(registry);
+
+        VM.prank(coordinator);
+        registry.finalizeWithBundle(
+            _encodeFinalizeInput(leader, operators, operatorSignatures, leaderSignature, bundleHash, "report://don/1")
+        );
+
+        uint256 available = registry.availableRewardPoolWei();
+        assertEqUint(available, 0.68 ether, "available reward pool mismatch");
+
+        uint256 ownerBalanceBefore = address(this).balance;
+        registry.withdrawAvailableRewards(payable(address(this)), available);
+        assertEqUint(address(this).balance, ownerBalanceBefore + available, "owner withdraw mismatch");
+        assertEqUint(registry.availableRewardPoolWei(), 0, "available pool should be zero after full withdraw");
+
+        VM.expectRevert(
+            abi.encodeWithSelector(DonConsensusRegistrySkeleton.RewardWithdrawalExceedsAvailable.selector, 1, 0)
+        );
+        registry.withdrawAvailableRewards(payable(address(this)), 1);
+    }
+
     function _allowOperators(DonConsensusRegistrySkeleton registry) private {
         address leader = VM.addr(_leaderPrivateKey());
         address operator2 = VM.addr(_operator2PrivateKey());
@@ -249,6 +322,12 @@ contract DonConsensusRegistrySkeletonTest {
         operatorSignatures[2] = _signDigest(operator3Pk, operatorApprovalDigest);
     }
 
+    function _fundRegistry(address target, uint256 amount) private {
+        VM.deal(address(this), amount);
+        (bool success, ) = target.call{value: amount}("");
+        require(success, "fund registry failed");
+    }
+
     function _signDigest(uint256 privateKey, bytes32 digest) private returns (bytes memory signature) {
         (uint8 v, bytes32 r, bytes32 s) = VM.sign(privateKey, digest);
         signature = abi.encodePacked(r, s, v);
@@ -287,5 +366,9 @@ contract DonConsensusRegistrySkeletonTest {
 
     function assertTrue(bool condition, string memory message) private pure {
         require(condition, message);
+    }
+
+    function assertEqUint(uint256 left, uint256 right, string memory message) private pure {
+        require(left == right, message);
     }
 }

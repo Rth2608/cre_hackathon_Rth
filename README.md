@@ -490,3 +490,40 @@ Before using `USE_DON_BUNDLE_FINALIZE=true` on a real network:
 1. Deploy `DonConsensusRegistrySkeleton` (`contracts/script/DeployDonConsensus.s.sol`).
 2. Set `CONTRACT_ADDRESS` to that deployment.
 3. Allow operators via `setOperatorPermission` (or `setOperatorPermissions`) from owner account.
+
+### DON operator rewards (on-chain accrue/claim)
+
+`DonConsensusRegistrySkeleton` now supports reward accounting for included operators in finalized bundles:
+
+- owner sets reward policy (`rewardPerResponderWei`, `leaderBonusWei`, `rewardsEnabled`)
+- each successful `finalizeWithBundle` accrues pending rewards for `includedOperators`
+- leader receives `rewardPerResponderWei + leaderBonusWei`
+- non-leader included operators receive `rewardPerResponderWei`
+- operators claim rewards directly with `claimRewards(recipient)`
+
+Useful calls:
+
+```bash
+# 1) configure reward policy (owner)
+cast send "$CONTRACT_ADDRESS" \
+  "setRewardConfig(uint256,uint256,bool)" \
+  10000000000000000 5000000000000000 true \
+  --rpc-url "$RPC_URL" --private-key "$OWNER_PRIVATE_KEY"
+
+# 2) fund reward pool (owner or any account)
+cast send "$CONTRACT_ADDRESS" \
+  --value 1ether \
+  --rpc-url "$RPC_URL" --private-key "$OWNER_PRIVATE_KEY"
+
+# 3) inspect pending reward for an operator
+cast call "$CONTRACT_ADDRESS" \
+  "pendingRewardWei(address)(uint256)" \
+  <OPERATOR_ADDRESS> \
+  --rpc-url "$RPC_URL"
+
+# 4) claim reward from operator wallet
+cast send "$CONTRACT_ADDRESS" \
+  "claimRewards(address)" \
+  <OPERATOR_ADDRESS> \
+  --rpc-url "$RPC_URL" --private-key "$OPERATOR_PRIVATE_KEY"
+```
