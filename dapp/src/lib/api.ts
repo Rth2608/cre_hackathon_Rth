@@ -202,6 +202,7 @@ interface ApiEnvelope<T> {
   data?: T;
   error?: string;
   detail?: string;
+  issues?: string[];
 }
 
 interface ApiRequestErrorOptions {
@@ -209,6 +210,7 @@ interface ApiRequestErrorOptions {
   errorCode?: string;
   detail?: string;
   traceId?: string;
+  issues?: string[];
 }
 
 export class ApiRequestError extends Error {
@@ -216,6 +218,7 @@ export class ApiRequestError extends Error {
   readonly errorCode?: string;
   readonly detail?: string;
   readonly traceId?: string;
+  readonly issues?: string[];
 
   constructor(message: string, options: ApiRequestErrorOptions) {
     super(message);
@@ -224,6 +227,7 @@ export class ApiRequestError extends Error {
     this.errorCode = options.errorCode;
     this.detail = options.detail;
     this.traceId = options.traceId;
+    this.issues = options.issues;
   }
 }
 
@@ -580,13 +584,18 @@ async function requestJson<T>(path: string, options?: RequestInit): Promise<T> {
     const payloadRecord = payload as unknown as Record<string, unknown>;
     const errorCode = typeof payloadRecord.error === "string" ? payloadRecord.error.trim() : "";
     const detail = typeof payloadRecord.detail === "string" ? payloadRecord.detail.trim() : "";
+    const issues = Array.isArray(payloadRecord.issues)
+      ? payloadRecord.issues.filter((item): item is string => typeof item === "string").map((item) => item.trim())
+      : [];
+    const normalizedDetail = detail || (issues.length > 0 ? issues.join(" | ") : "");
     const traceId = typeof payloadRecord.traceId === "string" ? payloadRecord.traceId.trim() : undefined;
-    const message = errorCode ? (detail ? `${errorCode}: ${detail}` : errorCode) : `HTTP ${response.status}`;
+    const message = errorCode ? (normalizedDetail ? `${errorCode}: ${normalizedDetail}` : errorCode) : `HTTP ${response.status}`;
     throw new ApiRequestError(message, {
       status: response.status,
       errorCode: errorCode || undefined,
-      detail: detail || undefined,
-      traceId
+      detail: normalizedDetail || undefined,
+      traceId,
+      issues: issues.length > 0 ? issues : undefined
     });
   }
 
