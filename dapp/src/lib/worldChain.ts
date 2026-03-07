@@ -2,13 +2,13 @@ import { defineChain } from "thirdweb";
 import { getWalletBalance } from "thirdweb/wallets";
 import { thirdwebClient } from "./thirdweb";
 
-const DEFAULT_WORLDCHAIN_SEPOLIA_CHAIN_ID = 11155111;
-const rawWorldChainSepoliaChainId = Number.parseInt((import.meta.env.VITE_WORLDCHAIN_SEPOLIA_CHAIN_ID || "11155111").trim(), 10);
+const DEFAULT_WORLDCHAIN_SEPOLIA_CHAIN_ID = 4801;
+const rawWorldChainSepoliaChainId = Number.parseInt((import.meta.env.VITE_WORLDCHAIN_SEPOLIA_CHAIN_ID || "4801").trim(), 10);
 const worldChainSepoliaChainId = Number.isInteger(rawWorldChainSepoliaChainId) && rawWorldChainSepoliaChainId > 0
   ? rawWorldChainSepoliaChainId
   : DEFAULT_WORLDCHAIN_SEPOLIA_CHAIN_ID;
 const worldChainSepoliaRpcUrl = (import.meta.env.VITE_WORLDCHAIN_SEPOLIA_RPC_URL || "").trim();
-const virtualChainName = (import.meta.env.VITE_WORLDCHAIN_NETWORK_NAME || "Ethereum Sepolia (Virtual)").trim();
+const virtualChainName = (import.meta.env.VITE_WORLDCHAIN_NETWORK_NAME || "World Chain Sepolia").trim();
 
 const virtualTokenEnvList = (import.meta.env.VITE_WORLDCHAIN_VIRTUAL_TOKEN_ADDRESSES || "").trim();
 const configuredStakeTokenAddress = (import.meta.env.VITE_STAKE_TOKEN_ADDRESS || "").trim();
