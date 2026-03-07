@@ -9,7 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@worldcoin/idkit": "^1.4.2",
+    "@worldcoin/idkit": "^4.0.8",
     "@worldcoin/minikit-js": "^1.9.7",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

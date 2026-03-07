@@ -19,6 +19,7 @@ import { generateRequestId, hashObject, nowIso, resolveProjectPath } from "./uti
 import { ValidationError, validateMarketRequest } from "./validator";
 import {
   consumeWorldIdSessionToken,
+  issueWorldIdRpContext,
   issueWorldIdSessionFromProof,
   validateWorldIdSessionToken
 } from "./worldId";
@@ -2409,6 +2410,58 @@ interface VerifyWorldIdBody {
   clientSource?: string;
 }
 
+interface IssueWorldIdRpContextBody {
+  walletAddress: string;
+}
+
+async function handleIssueWorldIdRpContext(req: Request): Promise<Response> {
+  let body: IssueWorldIdRpContextBody;
+  try {
+    body = await parseJsonBody<IssueWorldIdRpContextBody>(req);
+  } catch (error) {
+    return jsonResponse(
+      {
+        ok: false,
+        error: "invalid_json",
+        detail: error instanceof Error ? error.message : String(error)
+      },
+      400
+    );
+  }
+
+  try {
+    const normalizedWalletAddress = normalizeAddress(body.walletAddress);
+    const walletAuth = await requireWalletRequestAuth(req, normalizedWalletAddress);
+    if (!walletAuth.ok) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: walletAuth.error,
+          detail: walletAuth.detail
+        },
+        walletAuth.status
+      );
+    }
+
+    const rpContext = issueWorldIdRpContext();
+    return jsonResponse({
+      ok: true,
+      data: {
+        rpContext
+      }
+    });
+  } catch (error) {
+    return jsonResponse(
+      {
+        ok: false,
+        error: "world_id_rp_context_issue_failed",
+        detail: error instanceof Error ? error.message : String(error)
+      },
+      400
+    );
+  }
+}
+
 async function handleVerifyWorldId(req: Request): Promise<Response> {
   let body: VerifyWorldIdBody;
   try {
@@ -3047,6 +3100,10 @@ async function router(req: Request): Promise<Response> {
 
   if (req.method === "POST" && pathname === "/api/world-id/verify") {
     return handleVerifyWorldId(req);
+  }
+
+  if (req.method === "POST" && pathname === "/api/world-id/rp-context") {
+    return handleIssueWorldIdRpContext(req);
   }
 
   if (req.method === "POST" && pathname === "/api/nodes/register") {

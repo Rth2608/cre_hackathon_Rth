@@ -197,6 +197,14 @@ export interface WorldIdSession {
   source: "world_id_cloud";
 }
 
+export interface WorldIdRpContext {
+  rp_id: string;
+  nonce: string;
+  created_at: number;
+  expires_at: number;
+  signature: string;
+}
+
 interface ApiEnvelope<T> {
   ok: boolean;
   data?: T;
@@ -847,6 +855,29 @@ export async function verifyWorldIdForWallet(input: {
       appId: input.appId,
       action: input.action,
       clientSource: input.clientSource
+    })
+  });
+}
+
+export async function issueWorldIdRpContextForWallet(input: {
+  walletAddress: string;
+  account?: Account;
+}): Promise<{ rpContext: WorldIdRpContext }> {
+  if (!input.account) {
+    throw new Error("wallet_account_required");
+  }
+  const authWalletAddress = resolveAuthWalletAddress(input.walletAddress, input.account);
+  const auth = await buildWalletAuthHeaders({
+    account: input.account,
+    walletAddress: authWalletAddress,
+    method: "POST",
+    path: "/api/world-id/rp-context"
+  });
+  return requestJson<{ rpContext: WorldIdRpContext }>("/api/world-id/rp-context", {
+    method: "POST",
+    headers: auth.headers,
+    body: JSON.stringify({
+      walletAddress: auth.walletAddress
     })
   });
 }

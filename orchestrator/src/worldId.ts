@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { getAddress, keccak256, toUtf8Bytes } from "ethers";
+import { getAddress, keccak256, SigningKey, toUtf8Bytes } from "ethers";
 import { ensureDir, nowIso, readJsonFile, resolveProjectPath, writeJsonFileAtomic } from "./utils";
 
 const DEFAULT_WORLD_ID_VERIFY_API_V4_BASE = "https://developer.world.org/api/v4/verify";
@@ -36,6 +36,14 @@ export interface WorldIdSession {
   issuedAt: string;
   expiresAt: string;
   source: "world_id_cloud";
+}
+
+export interface WorldIdRpContext {
+  rp_id: string;
+  nonce: string;
+  created_at: number;
+  expires_at: number;
+  signature: string;
 }
 
 export interface WorldIdProofInput {
@@ -371,6 +379,81 @@ function resolveWorldIdVerifyV4RouteId(defaultAppId: string): string {
   }
   const normalizedDefault = defaultAppId.trim();
   return normalizedDefault.startsWith("rp_") ? normalizedDefault : "";
+}
+
+function resolveWorldIdRpSigningKey(): string {
+  const primary = process.env.WORLD_ID_RP_SIGNING_KEY?.trim() ?? "";
+  if (primary) {
+    return primary;
+  }
+  return process.env.WORLD_ID_SIGNER_PRIVATE_KEY?.trim() ?? "";
+}
+
+function resolveWorldIdRpSignatureTtlSeconds(): number {
+  const parsed = Number.parseInt(process.env.WORLD_ID_RP_SIGNATURE_TTL_SECONDS?.trim() ?? "", 10);
+  if (!Number.isFinite(parsed) || parsed < 30 || parsed > 3600) {
+    return 300;
+  }
+  return parsed;
+}
+
+function bytesToHex(value: Uint8Array): string {
+  return `0x${Buffer.from(value).toString("hex")}`;
+}
+
+function hexToBytes(value: string): Uint8Array {
+  const normalized = value.startsWith("0x") || value.startsWith("0X") ? value.slice(2) : value;
+  if (!/^[0-9a-fA-F]+$/.test(normalized) || normalized.length % 2 !== 0) {
+    throw new Error("world_id_rp_signing_key_invalid_hex");
+  }
+  return Uint8Array.from(Buffer.from(normalized, "hex"));
+}
+
+function computeRpSignatureMessage(nonceBytes: Uint8Array, createdAt: number, expiresAt: number): Uint8Array {
+  const message = new Uint8Array(48);
+  message.set(nonceBytes, 0);
+  const view = new DataView(message.buffer);
+  view.setBigUint64(32, BigInt(createdAt), false);
+  view.setBigUint64(40, BigInt(expiresAt), false);
+  return message;
+}
+
+function hashToField(input: Uint8Array): Uint8Array {
+  const digest = keccak256(input);
+  const shifted = BigInt(digest) >> 8n;
+  const hex = shifted.toString(16).padStart(64, "0");
+  return hexToBytes(hex);
+}
+
+export function issueWorldIdRpContext(): WorldIdRpContext {
+  const rpId = process.env.WORLD_ID_RP_ID?.trim() ?? "";
+  if (!rpId) {
+    throw new Error("world_id_rp_id_missing");
+  }
+
+  const signingKey = resolveWorldIdRpSigningKey();
+  if (!signingKey) {
+    throw new Error("world_id_rp_signing_key_missing");
+  }
+  if (!/^0x[0-9a-fA-F]{64}$/.test(signingKey)) {
+    throw new Error("world_id_rp_signing_key_invalid_format");
+  }
+
+  const random = randomBytes(32);
+  const nonceBytes = hashToField(Uint8Array.from(random));
+  const createdAt = Math.floor(Date.now() / 1000);
+  const expiresAt = createdAt + resolveWorldIdRpSignatureTtlSeconds();
+  const message = computeRpSignatureMessage(nonceBytes, createdAt, expiresAt);
+  const digest = keccak256(message);
+  const signature = new SigningKey(signingKey).sign(digest).serialized;
+
+  return {
+    rp_id: rpId,
+    nonce: bytesToHex(nonceBytes),
+    created_at: createdAt,
+    expires_at: expiresAt,
+    signature
+  };
 }
 
 function resolveWorldIdRequestTimeoutMs(): number {

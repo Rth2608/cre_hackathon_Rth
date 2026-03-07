@@ -10,17 +10,19 @@ import {
   VerificationLevel as MiniKitVerificationLevel
 } from "@worldcoin/minikit-js";
 import {
-  IDKitWidget,
-  VerificationLevel as ExternalVerificationLevel,
-  type IErrorState as ExternalVerifyErrorState,
-  type ISuccessResult as ExternalVerifySuccessResult
+  IDKitRequestWidget,
+  deviceLegacy,
+  type IDKitErrorCodes as ExternalVerifyErrorCode,
+  type IDKitResult as ExternalVerifyResult
 } from "@worldcoin/idkit";
 import { ConnectButton, useActiveAccount, useActiveWalletChain, useWalletBalance } from "thirdweb/react";
 import AppNav from "../components/AppNav";
 import {
   createRequestForWallet,
+  issueWorldIdRpContextForWallet,
   verifyWorldIdForWallet,
   type MarketRequestInput,
+  type WorldIdRpContext,
   type WorldIdSession
 } from "../lib/api";
 import { formatKnownMiniKitMessage } from "../lib/miniKitErrors";
@@ -88,6 +90,10 @@ const EXTERNAL_VERIFY_TIMEOUT_MS = 90_000;
 const SUBMIT_FLOW_TIMEOUT_MS = 120_000;
 const MINI_INSTALL_RETRY_COUNT = 2;
 const MINI_INSTALL_RETRY_DELAY_MS = 350;
+const externalWorldIdEnvironment = (() => {
+  const raw = (import.meta.env.VITE_WORLD_ID_EXTERNAL_ENVIRONMENT || "staging").trim().toLowerCase();
+  return raw === "production" ? "production" : "staging";
+})();
 
 function formatShortAddress(value: string): string {
   const trimmed = value.trim();
@@ -290,33 +296,25 @@ function buildWorldProofFromMiniKit(
 }
 
 function buildWorldProofFromExternalResult(
-  result: ExternalVerifySuccessResult,
+  result: ExternalVerifyResult,
   input: { action: string; signal: string }
 ): Record<string, unknown> {
-  const proof = result.proof.trim();
-  const nullifierHash = result.nullifier_hash.trim();
-  const merkleRoot = result.merkle_root.trim();
-  const verificationLevel =
-    typeof result.verification_level === "string" ? result.verification_level.trim().toLowerCase() : undefined;
-
-  if (!proof || !nullifierHash || !merkleRoot) {
+  const raw = result as unknown as Record<string, unknown>;
+  const responses = raw.responses;
+  if (!Array.isArray(responses) || responses.length === 0) {
     throw new Error("world_id_external_result_invalid");
   }
 
   return {
-    protocol_version: "3.0",
-    nonce: `external-${Date.now()}-${Math.random()}`,
-    action: input.action,
-    signal: input.signal,
-    responses: [
-      {
-        nullifier: nullifierHash,
-        nullifier_hash: nullifierHash,
-        merkle_root: merkleRoot,
-        proof,
-        verification_level: verificationLevel
-      }
-    ]
+    ...raw,
+    action:
+      typeof raw.action === "string" && raw.action.trim().length > 0
+        ? raw.action
+        : input.action,
+    signal:
+      typeof raw.signal === "string" && raw.signal.trim().length > 0
+        ? raw.signal
+        : input.signal
   };
 }
 
@@ -353,11 +351,17 @@ function getWorldIdErrorMessage(error: unknown): string {
   if (message === "world_id_external_result_invalid") {
     return "External widget returned an invalid proof payload. Retry verification.";
   }
-  if (message === "external_world_id_widget_unavailable") {
-    return "World ID external widget is unavailable. Reload the page and retry.";
+  if (message === "external_world_id_widget_not_ready") {
+    return "World ID external widget is not ready yet. Retry in a moment.";
   }
   if (message === "external_world_id_verify_in_flight") {
     return "A World ID external verification is already in progress.";
+  }
+  if (message.includes("world_id_rp_context_issue_failed: world_id_rp_signing_key_missing")) {
+    return "Backend is missing WORLD_ID_RP_SIGNING_KEY for web World ID requests.";
+  }
+  if (message.includes("world_id_rp_context_issue_failed: world_id_rp_id_missing")) {
+    return "Backend is missing WORLD_ID_RP_ID for web World ID requests.";
   }
   const externalRejectedMatch = message.match(/^world_id_verify_failed:\s*([a-z0-9_]+)$/i);
   if (externalRejectedMatch) {
@@ -538,12 +542,13 @@ export default function SubmitPage() {
   const [worldChainBalances, setWorldChainBalances] = useState<WorldChainVirtualBalanceSnapshot | null>(null);
   const [worldChainBalancesLoading, setWorldChainBalancesLoading] = useState(false);
   const [worldChainBalancesError, setWorldChainBalancesError] = useState<string | null>(null);
+  const [externalWidgetOpen, setExternalWidgetOpen] = useState(false);
+  const [externalRpContext, setExternalRpContext] = useState<WorldIdRpContext | null>(null);
 
   const miniVerifyRawPayloadsRef = useRef<MiniAppVerifyActionPayload[]>([]);
-  const externalWidgetOpenRef = useRef<(() => void) | null>(null);
   const externalVerifyPendingRef = useRef<{
     timeoutId: number;
-    resolve: (result: ExternalVerifySuccessResult) => void;
+    resolve: (result: ExternalVerifyResult) => void;
     reject: (error: Error) => void;
   } | null>(null);
 
@@ -558,6 +563,11 @@ export default function SubmitPage() {
         submitterAddress: walletAddress
       };
     });
+  }, [walletAddress]);
+
+  useEffect(() => {
+    setExternalRpContext(null);
+    setExternalWidgetOpen(false);
   }, [walletAddress]);
 
   useEffect(() => {
@@ -698,43 +708,61 @@ export default function SubmitPage() {
     setError(null);
   };
 
-  const onExternalWorldIdSuccess = (result: ExternalVerifySuccessResult) => {
+  const onExternalWorldIdSuccess = (result: ExternalVerifyResult) => {
     const pending = externalVerifyPendingRef.current;
     if (!pending) {
       return;
     }
     window.clearTimeout(pending.timeoutId);
     externalVerifyPendingRef.current = null;
+    setExternalWidgetOpen(false);
     pending.resolve(result);
   };
 
-  const onExternalWorldIdError = (errorState: ExternalVerifyErrorState) => {
+  const onExternalWorldIdError = (errorCode: ExternalVerifyErrorCode) => {
     const pending = externalVerifyPendingRef.current;
     if (!pending) {
       return;
     }
     window.clearTimeout(pending.timeoutId);
     externalVerifyPendingRef.current = null;
-    const code = typeof errorState.code === "string" ? errorState.code : "unknown";
-    pending.reject(new Error(`world_id_verify_failed: ${code}`));
+    setExternalWidgetOpen(false);
+    pending.reject(new Error(`world_id_verify_failed: ${errorCode}`));
   };
 
-  const runExternalWorldIdVerifyCommand = async (): Promise<ExternalVerifySuccessResult> => {
+  const onExternalWidgetOpenChange = (open: boolean) => {
+    setExternalWidgetOpen(open);
+    if (open) {
+      return;
+    }
+    const pending = externalVerifyPendingRef.current;
+    if (!pending) {
+      return;
+    }
+    window.clearTimeout(pending.timeoutId);
+    externalVerifyPendingRef.current = null;
+    pending.reject(new Error("world_id_verify_cancelled: widget_closed"));
+  };
+
+  const runExternalWorldIdVerifyCommand = async (): Promise<ExternalVerifyResult> => {
     if (externalVerifyPendingRef.current) {
       throw new Error("external_world_id_verify_in_flight");
     }
-    const open = externalWidgetOpenRef.current;
-    if (!open) {
-      throw new Error("external_world_id_widget_unavailable");
-    }
 
-    return new Promise<ExternalVerifySuccessResult>((resolve, reject) => {
+    const rpContextResult = await issueWorldIdRpContextForWallet({
+      walletAddress,
+      account: activeAccount
+    });
+    setExternalRpContext(rpContextResult.rpContext);
+
+    return new Promise<ExternalVerifyResult>((resolve, reject) => {
       const timeoutId = window.setTimeout(() => {
         const pending = externalVerifyPendingRef.current;
         if (!pending) {
           return;
         }
         externalVerifyPendingRef.current = null;
+        setExternalWidgetOpen(false);
         pending.reject(new Error("world_id_verify_timeout: no verify response returned from external widget."));
       }, EXTERNAL_VERIFY_TIMEOUT_MS);
 
@@ -744,17 +772,7 @@ export default function SubmitPage() {
         reject
       };
 
-      try {
-        open();
-      } catch (error) {
-        const pending = externalVerifyPendingRef.current;
-        if (!pending) {
-          return;
-        }
-        window.clearTimeout(timeoutId);
-        externalVerifyPendingRef.current = null;
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
-      }
+      setExternalWidgetOpen(true);
     });
   };
 
@@ -1077,21 +1095,20 @@ export default function SubmitPage() {
 
         {error && <p className="error-text">{error}</p>}
 
-        {externalWorldIdConfigured && (
-          <IDKitWidget
-            app_id={worldIdConfig.external.appId}
+        {externalWorldIdConfigured && externalRpContext && (
+          <IDKitRequestWidget
+            open={externalWidgetOpen}
+            onOpenChange={onExternalWidgetOpenChange}
+            app_id={worldIdConfig.external.appId as `app_${string}`}
             action={worldIdConfig.external.action}
-            signal={worldIdSignal}
-            verification_level={ExternalVerificationLevel.Device}
+            rp_context={externalRpContext}
+            preset={deviceLegacy({ signal: worldIdSignal })}
+            allow_legacy_proofs
+            environment={externalWorldIdEnvironment}
             autoClose
             onSuccess={onExternalWorldIdSuccess}
             onError={onExternalWorldIdError}
-          >
-            {({ open }: { open: () => void }) => {
-              externalWidgetOpenRef.current = open;
-              return null;
-            }}
-          </IDKitWidget>
+          />
         )}
       </main>
     </div>
