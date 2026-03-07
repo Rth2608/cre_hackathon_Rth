@@ -71,6 +71,7 @@ interface ParsedWorldIdLegacyProofPayload {
   nullifierHash: string;
   verificationLevel?: string;
   action?: string;
+  signal?: string;
   signalHash?: string;
   merkleRoot: string;
   proof: string;
@@ -295,6 +296,7 @@ function parseWorldIdLegacyProof(rawInput: WorldIdProofInput): ParsedWorldIdLega
     nullifierHash,
     verificationLevel,
     action,
+    signal,
     signalHash,
     merkleRoot,
     proof
@@ -657,13 +659,19 @@ function buildWorldVerifyRequestBodyV2(input: {
   const verificationLevel = toTrimmedString(raw.verification_level) ?? input.proofPayload.verificationLevel;
   if (verificationLevel) {
     requestBody.verification_level = verificationLevel;
+    requestBody.credential_type = verificationLevel;
+  }
+
+  const signal = toTrimmedString(raw.signal) ?? input.proofPayload.signal;
+  if (signal) {
+    requestBody.signal = signal;
   }
 
   const signalHash = toTrimmedString(raw.signal_hash) ?? input.proofPayload.signalHash;
   if (signalHash) {
     requestBody.signal_hash = signalHash;
   } else {
-    const rawSignal = toTrimmedString(raw.signal);
+    const rawSignal = signal;
     if (rawSignal) {
       requestBody.signal_hash = hashSignalToField(rawSignal);
     }
@@ -820,7 +828,13 @@ export async function issueWorldIdSessionFromProof(input: {
     const detail = verifyResult.payload && typeof verifyResult.payload.detail === "string" ? verifyResult.payload.detail : "";
     const code = verifyResult.payload && typeof verifyResult.payload.code === "string" ? verifyResult.payload.code : "";
     const reason = [code, detail].filter(Boolean).join(" ");
-    throw new Error(`world_id_verify_failed (${verifyResult.status})${reason ? `: ${reason}` : ""}`);
+    const context = [
+      `mode=${parsedProof.mode}`,
+      `app_id=${selectedProfile.appId}`,
+      `action=${selectedProfile.action}`,
+      `client_source=${requestedClientSource ?? "-"}`
+    ].join(", ");
+    throw new Error(`world_id_verify_failed (${verifyResult.status})${reason ? `: ${reason}` : ""} [${context}]`);
   }
 
   const db = await loadDbWithPrune();
