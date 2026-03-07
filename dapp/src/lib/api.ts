@@ -255,21 +255,40 @@ function isLikelyEvmAddress(value: string): boolean {
   return /^0x[a-fA-F0-9]{40}$/.test(value.trim());
 }
 
+function extractEvmAddress(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  if (isLikelyEvmAddress(trimmed)) {
+    return toLowerAddress(trimmed);
+  }
+  const match = trimmed.match(/0x[a-fA-F0-9]{40}/);
+  if (match && isLikelyEvmAddress(match[0])) {
+    return toLowerAddress(match[0]);
+  }
+  return undefined;
+}
+
 function resolveAuthWalletAddress(walletAddress: string, account?: Account): string {
   if (MiniKit.isInstalled()) {
-    const miniWalletRaw = MiniKit.user?.walletAddress;
-    if (typeof miniWalletRaw === "string" && isLikelyEvmAddress(miniWalletRaw)) {
-      return toLowerAddress(miniWalletRaw);
+    const miniWallet = extractEvmAddress(MiniKit.user?.walletAddress);
+    if (miniWallet) {
+      return miniWallet;
     }
   }
-  const accountWalletRaw =
+  const accountWallet =
     typeof (account as { address?: unknown } | undefined)?.address === "string"
       ? ((account as { address?: string }).address ?? "")
       : "";
-  if (isLikelyEvmAddress(accountWalletRaw)) {
-    return toLowerAddress(accountWalletRaw);
+  const normalizedAccountWallet = extractEvmAddress(accountWallet);
+  if (normalizedAccountWallet) {
+    return normalizedAccountWallet;
   }
-  return toLowerAddress(walletAddress);
+  return extractEvmAddress(walletAddress) ?? toLowerAddress(walletAddress);
 }
 
 function buildWalletAuthMessage(input: {
@@ -321,8 +340,7 @@ async function signWithMiniKitFallback(input: {
   if (!signature) {
     throw new Error("minikit_sign_failed: empty_signature");
   }
-  const signerAddressRaw = typeof payload.address === "string" ? payload.address.trim() : "";
-  const signerAddress = isLikelyEvmAddress(signerAddressRaw) ? toLowerAddress(signerAddressRaw) : undefined;
+  const signerAddress = extractEvmAddress(payload.address);
   return {
     signature,
     signerAddress
