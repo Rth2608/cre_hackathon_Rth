@@ -190,6 +190,54 @@ function resolveRequestVectorSyncBlockOnFailure(): boolean {
   return parseBooleanEnv(process.env.REQUEST_VECTOR_SYNC_BLOCK_ON_FAILURE, true);
 }
 
+function resolveRequestStrictFifoResolutionEnabled(): boolean {
+  return parseBooleanEnv(process.env.REQUEST_STRICT_FIFO_RESOLUTION_ENABLED, true);
+}
+
+function compareRequestsByCreatedAt(a: StoredRequest, b: StoredRequest): number {
+  const byCreatedAt = a.createdAt.localeCompare(b.createdAt);
+  if (byCreatedAt !== 0) {
+    return byCreatedAt;
+  }
+  return a.requestId.localeCompare(b.requestId);
+}
+
+function isVerificationResolvedStatus(status: RequestStatus): boolean {
+  return status === "FINALIZED" || isRejectedRequestStatus(status);
+}
+
+function findEarlierUnresolvedRequest(
+  records: StoredRequest[],
+  target: StoredRequest
+): StoredRequest | null {
+  if (!resolveRequestStrictFifoResolutionEnabled()) {
+    return null;
+  }
+
+  const sorted = [...records].sort(compareRequestsByCreatedAt);
+  const targetIndex = sorted.findIndex((record) => record.requestId === target.requestId);
+  if (targetIndex <= 0) {
+    return null;
+  }
+
+  for (let index = 0; index < targetIndex; index += 1) {
+    const candidate = sorted[index];
+    if (!candidate || candidate.requestId === target.requestId) {
+      continue;
+    }
+    if (!isVerificationResolvedStatus(candidate.status)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+async function findEarlierUnresolvedRequestForTarget(target: StoredRequest): Promise<StoredRequest | null> {
+  const records = await listRequests();
+  return findEarlierUnresolvedRequest(records, target);
+}
+
 function mapRequestStatusToVectorStatus(
   status: RequestStatus
 ): NonNullable<StoredRequest["vectorSync"]>["vectorStatus"] {
@@ -581,12 +629,26 @@ async function evaluateRequestQueueScreening(input: {
   candidate: MarketRequestInput;
   existing: StoredRequest[];
   selfRequestId?: string;
+  candidateCreatedAt?: string;
 }): Promise<RequestQueueScreeningResult> {
   const dedupeKey = buildRequestDedupeKey(input.candidate);
   const conflictKey = buildRequestConflictKey(input.candidate);
-  const relevantRecords = input.existing.filter(
-    (record) => record.requestId !== input.selfRequestId && isActiveRequestStatusForScreening(record.status)
-  );
+  const relevantRecords = input.existing
+    .filter((record) => record.requestId !== input.selfRequestId && isActiveRequestStatusForScreening(record.status))
+    .filter((record) =>
+      input.candidateCreatedAt ? record.createdAt.localeCompare(input.candidateCreatedAt) <= 0 : true
+    );
+
+  if (relevantRecords.length === 0) {
+    return {
+      decision: "allow",
+      reason: "vector_screening_no_existing_records",
+      queuePriority: computeHeuristicQueuePriority(input.candidate),
+      dedupeKey,
+      conflictKey,
+      source: "heuristic"
+    };
+  }
 
   const duplicate = relevantRecords.find((record) => buildRequestDedupeKey(record.input) === dedupeKey);
   if (duplicate) {
@@ -694,6 +756,7 @@ async function processQueuedRequests(reason: string): Promise<void> {
 
   requestQueueProcessorRunning = true;
   let vectorSyncBlocked = false;
+  let strictFifoBlocked = false;
   logServerEvent("info", "request.queue.processor.start", { reason });
   try {
     while (true) {
@@ -708,6 +771,18 @@ async function processQueuedRequests(reason: string): Promise<void> {
         continue;
       }
       const traceId = buildRequestRunTraceId(fresh.requestId, fresh.runAttempts + 1);
+
+      const earlierUnresolved = findEarlierUnresolvedRequest(all, fresh);
+      if (earlierUnresolved) {
+        strictFifoBlocked = true;
+        logServerFailure("request.queue.processor.blocked_strict_fifo", {
+          requestId: fresh.requestId,
+          traceId,
+          blockedByRequestId: earlierUnresolved.requestId,
+          blockedByStatus: earlierUnresolved.status
+        });
+        break;
+      }
 
       const gateReady = await ensureEarlierTerminalVectorSyncApplied(fresh);
       if (!gateReady) {
@@ -762,6 +837,10 @@ async function processQueuedRequests(reason: string): Promise<void> {
         if (vectorSyncBlocked && resolveRequestVectorSyncBlockOnFailure()) {
           setTimeout(() => {
             scheduleRequestQueueProcessor("vector_sync_retry_after_block");
+          }, 10_000);
+        } else if (strictFifoBlocked && resolveRequestStrictFifoResolutionEnabled()) {
+          setTimeout(() => {
+            scheduleRequestQueueProcessor("strict_fifo_retry_after_block");
           }, 10_000);
         } else {
           scheduleRequestQueueProcessor("pending_remaining_after_drain");
@@ -1723,7 +1802,8 @@ async function screenPendingRequestBeforeRun(
   const screening = await evaluateRequestQueueScreening({
     candidate: existing.input,
     existing: await listRequests(),
-    selfRequestId: existing.requestId
+    selfRequestId: existing.requestId,
+    candidateCreatedAt: existing.createdAt
   });
   const now = nowIso();
   const screenedRecord: StoredRequest = {
@@ -1772,6 +1852,23 @@ async function executeVerificationForRecord(
 ): Promise<Response> {
   const latest = await getRequest(existing.requestId);
   const current = latest ?? existing;
+  const earlierUnresolved = await findEarlierUnresolvedRequestForTarget(current);
+  if (earlierUnresolved) {
+    return jsonResponse(
+      {
+        ok: false,
+        error: "request_fifo_blocked",
+        detail: `blocked_by_request:${earlierUnresolved.requestId}:${earlierUnresolved.status}`,
+        blockedBy: {
+          requestId: earlierUnresolved.requestId,
+          status: earlierUnresolved.status,
+          createdAt: earlierUnresolved.createdAt
+        },
+        data: buildRequestResponse(current)
+      },
+      409
+    );
+  }
 
   if (current.runAttempts >= MAX_RUN_ATTEMPTS) {
     return jsonResponse(
@@ -2101,7 +2198,8 @@ async function handleCreateRequest(req: Request): Promise<Response> {
     const timestamp = nowIso();
     const screening = await evaluateRequestQueueScreening({
       candidate: validated,
-      existing: await listRequests()
+      existing: await listRequests(),
+      candidateCreatedAt: timestamp
     });
     let status: RequestStatus = "PENDING";
     if (screening.decision === "reject_duplicate") {
@@ -2221,6 +2319,24 @@ async function handleRunVerification(req: Request, requestId: string): Promise<R
         detail: walletAuth.detail
       },
       walletAuth.status
+    );
+  }
+
+  const earlierUnresolved = await findEarlierUnresolvedRequestForTarget(existing);
+  if (earlierUnresolved) {
+    return jsonResponse(
+      {
+        ok: false,
+        error: "request_fifo_blocked",
+        detail: `blocked_by_request:${earlierUnresolved.requestId}:${earlierUnresolved.status}`,
+        blockedBy: {
+          requestId: earlierUnresolved.requestId,
+          status: earlierUnresolved.status,
+          createdAt: earlierUnresolved.createdAt
+        },
+        data: buildRequestResponse(existing)
+      },
+      409
     );
   }
 
