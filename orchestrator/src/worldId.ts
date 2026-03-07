@@ -716,17 +716,91 @@ async function verifyWithWorldCloudV2(input: {
   });
 }
 
+function describeVerifyFailure(result: VerifyApiResult): string {
+  const code = result.payload && typeof result.payload.code === "string" ? result.payload.code : "unknown_code";
+  const detail = result.payload && typeof result.payload.detail === "string" ? result.payload.detail : "unknown_detail";
+  return `status=${result.status}, code=${code}, detail=${detail}`;
+}
+
+function legacyProofToV4Payload(input: {
+  proofPayload: ParsedWorldIdLegacyProofPayload;
+  action: string;
+}): ParsedWorldIdV4ProofPayload {
+  const identifier = normalizeWorldIdV3Identifier(input.proofPayload.verificationLevel);
+  const rawPayload: Record<string, unknown> = {
+    protocol_version: "3.0",
+    nonce: `legacy-${Date.now()}-${randomBytes(8).toString("hex")}`,
+    action: input.action,
+    responses: [
+      {
+        identifier,
+        nullifier: input.proofPayload.nullifierHash,
+        nullifier_hash: input.proofPayload.nullifierHash,
+        merkle_root: input.proofPayload.merkleRoot,
+        proof: input.proofPayload.proof,
+        verification_level: input.proofPayload.verificationLevel
+      }
+    ]
+  };
+  if (input.proofPayload.signal) {
+    rawPayload.signal = input.proofPayload.signal;
+  }
+  if (input.proofPayload.signalHash) {
+    (rawPayload.responses as Array<Record<string, unknown>>)[0].signal_hash = input.proofPayload.signalHash;
+  }
+
+  return {
+    mode: "v4",
+    rawPayload,
+    nullifierHash: input.proofPayload.nullifierHash,
+    verificationLevel: input.proofPayload.verificationLevel,
+    action: input.action
+  };
+}
+
 async function verifyWithWorldCloud(input: {
   appId: string;
   action: string;
   proofPayload: ParsedWorldIdProofPayload;
 }): Promise<VerifyApiResult> {
   if (input.proofPayload.mode === "v2") {
-    return verifyWithWorldCloudV2({
+    // Prefer World ID 4.0 route when available, even for legacy-shaped proofs.
+    const v4RouteId = resolveWorldIdVerifyV4RouteId(input.appId);
+    let v4Attempt: VerifyApiResult | null = null;
+    if (v4RouteId) {
+      v4Attempt = await verifyWithWorldCloudV4({
+        routeId: v4RouteId,
+        proofPayload: legacyProofToV4Payload({
+          proofPayload: input.proofPayload,
+          action: input.action
+        })
+      });
+      if (v4Attempt.ok) {
+        return v4Attempt;
+      }
+    }
+
+    const v2Attempt = await verifyWithWorldCloudV2({
       appId: input.appId,
       action: input.action,
       proofPayload: input.proofPayload
     });
+    if (v2Attempt.ok) {
+      return v2Attempt;
+    }
+
+    if (v4Attempt) {
+      return {
+        ok: false,
+        status: v4Attempt.status,
+        payload: {
+          success: false,
+          code: "world_id_verify_failed_all_paths",
+          detail: `v4{${describeVerifyFailure(v4Attempt)}} | v2{${describeVerifyFailure(v2Attempt)}}`
+        }
+      };
+    }
+    return v2Attempt;
   }
 
   const v4RouteId = resolveWorldIdVerifyV4RouteId(input.appId);
