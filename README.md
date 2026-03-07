@@ -408,7 +408,6 @@ The orchestrator reads chain settings from `orchestrator/.env`:
 - `DON_ENDPOINT_BUNDLE_SIGNING_ENABLED` (default `true`, collect bundle signatures from workers)
 - `WORLD_ID_APP_ID` (required when `ASSUME_WORLD_ID_VERIFIED=false`)
 - `WORLD_ID_ACTION` (required when `ASSUME_WORLD_ID_VERIFIED=false`)
-- `WORLD_ID_VERIFY_API_V2_BASE_URL` (default `https://developer.worldcoin.org/api/v2/verify`, used for legacy IDKit proof payloads)
 - `WORLD_ID_VERIFY_API_V4_BASE_URL` (default `https://developer.world.org/api/v4/verify`)
 - `WORLD_ID_RP_ID` (v4 route id, e.g. `rp_xxx`; required for strict World ID 4.0 verify path)
 - `WORLD_ID_VERIFY_TIMEOUT_MS` (default `8000`)

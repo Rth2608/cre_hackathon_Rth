@@ -3,7 +3,6 @@ import { getAddress, keccak256, toUtf8Bytes } from "ethers";
 import { ensureDir, nowIso, readJsonFile, resolveProjectPath, writeJsonFileAtomic } from "./utils";
 
 const DEFAULT_WORLD_ID_VERIFY_API_V4_BASE = "https://developer.world.org/api/v4/verify";
-const DEFAULT_WORLD_ID_VERIFY_API_V2_BASE = "https://developer.worldcoin.org/api/v2/verify";
 const WORLD_ID_DB_PATH = resolveProjectPath("data", "world-id-sessions.json");
 
 interface WorldIdSessionDbSchema {
@@ -65,19 +64,7 @@ interface ParsedWorldIdV4ProofPayload {
   action?: string;
 }
 
-interface ParsedWorldIdLegacyProofPayload {
-  mode: "v2";
-  rawPayload: Record<string, unknown>;
-  nullifierHash: string;
-  verificationLevel?: string;
-  action?: string;
-  signal?: string;
-  signalHash?: string;
-  merkleRoot: string;
-  proof: string;
-}
-
-type ParsedWorldIdProofPayload = ParsedWorldIdV4ProofPayload | ParsedWorldIdLegacyProofPayload;
+type ParsedWorldIdProofPayload = ParsedWorldIdV4ProofPayload;
 
 export type WorldIdClientSource = "miniapp" | "external" | "manual";
 
@@ -233,86 +220,12 @@ function parseWorldIdV4Proof(rawInput: WorldIdProofInput): ParsedWorldIdV4ProofP
   };
 }
 
-function parseWorldIdLegacyProof(rawInput: WorldIdProofInput): ParsedWorldIdLegacyProofPayload | null {
-  const rootRecord = toRecord(rawInput);
-  if (!rootRecord) {
-    return null;
-  }
-
-  const nestedResult = toRecord(rootRecord.result);
-  const firstResponse = readFirstResponseRecord(rootRecord.responses);
-  const legacyCandidate = [rootRecord, nestedResult, firstResponse]
-    .filter((candidate): candidate is Record<string, unknown> => Boolean(candidate))
-    .find((candidate) => {
-      return Boolean(
-        toTrimmedString(candidate.proof) &&
-          (toTrimmedString(candidate.nullifier_hash) || toTrimmedString(candidate.nullifier)) &&
-          toTrimmedString(candidate.merkle_root)
-      );
-    });
-
-  if (!legacyCandidate) {
-    return null;
-  }
-
-  const proof = toTrimmedString(legacyCandidate.proof) ?? "";
-  const nullifierHash = normalizeHexStringMaybe(
-    toTrimmedString(legacyCandidate.nullifier_hash) ?? toTrimmedString(legacyCandidate.nullifier)
-  );
-  const merkleRoot = toTrimmedString(legacyCandidate.merkle_root) ?? "";
-  const verificationLevel =
-    toTrimmedString(legacyCandidate.verification_level) ??
-    toTrimmedString(legacyCandidate.credential_type) ??
-    toTrimmedString(rootRecord.verification_level);
-  const action = toTrimmedString(rootRecord.action) ?? toTrimmedString(legacyCandidate.action);
-  const signal = toTrimmedString(rootRecord.signal) ?? toTrimmedString(legacyCandidate.signal);
-  const signalHash = toTrimmedString(legacyCandidate.signal_hash) ?? toTrimmedString(rootRecord.signal_hash);
-
-  if (!proof || !nullifierHash || !merkleRoot) {
-    return null;
-  }
-
-  const rawPayload: Record<string, unknown> = {
-    merkle_root: merkleRoot,
-    nullifier_hash: nullifierHash,
-    proof
-  };
-  if (verificationLevel) {
-    rawPayload.verification_level = verificationLevel;
-  }
-  if (action) {
-    rawPayload.action = action;
-  }
-  if (signal) {
-    rawPayload.signal = signal;
-  }
-  if (signalHash) {
-    rawPayload.signal_hash = signalHash;
-  }
-
-  return {
-    mode: "v2",
-    rawPayload,
-    nullifierHash,
-    verificationLevel,
-    action,
-    signal,
-    signalHash,
-    merkleRoot,
-    proof
-  };
-}
-
 function parseWorldIdProof(rawInput: WorldIdProofInput): ParsedWorldIdProofPayload {
   const parsedV4 = parseWorldIdV4Proof(rawInput);
   if (parsedV4) {
     return parsedV4;
   }
-  const parsedLegacy = parseWorldIdLegacyProof(rawInput);
-  if (parsedLegacy) {
-    return parsedLegacy;
-  }
-  throw new Error("invalid_world_id_payload");
+  throw new Error("invalid_world_id_v4_payload");
 }
 
 function assertParsedProofValid(payload: ParsedWorldIdProofPayload): void {
@@ -449,10 +362,6 @@ function resolveRequestedProfile(input: {
 
 function resolveWorldIdVerifyApiV4Base(): string {
   return (process.env.WORLD_ID_VERIFY_API_V4_BASE_URL?.trim() ?? DEFAULT_WORLD_ID_VERIFY_API_V4_BASE).replace(/\/$/, "");
-}
-
-function resolveWorldIdVerifyApiV2Base(): string {
-  return (process.env.WORLD_ID_VERIFY_API_V2_BASE_URL?.trim() ?? DEFAULT_WORLD_ID_VERIFY_API_V2_BASE).replace(/\/$/, "");
 }
 
 function resolveWorldIdVerifyV4RouteId(defaultAppId: string): string {
@@ -644,52 +553,6 @@ function buildWorldVerifyRequestBody(input: { proofPayload: ParsedWorldIdV4Proof
   return requestBody;
 }
 
-function buildWorldVerifyRequestBodyV2(input: {
-  proofPayload: ParsedWorldIdLegacyProofPayload;
-  action: string;
-}): Record<string, unknown> {
-  const raw = input.proofPayload.rawPayload;
-  const requestBody: Record<string, unknown> = {
-    merkle_root: toTrimmedString(raw.merkle_root) ?? input.proofPayload.merkleRoot,
-    nullifier_hash: toTrimmedString(raw.nullifier_hash) ?? input.proofPayload.nullifierHash,
-    proof: toTrimmedString(raw.proof) ?? input.proofPayload.proof,
-    action: toTrimmedString(raw.action) ?? input.action
-  };
-
-  const verificationLevel = toTrimmedString(raw.verification_level) ?? input.proofPayload.verificationLevel;
-  if (verificationLevel) {
-    requestBody.verification_level = verificationLevel;
-    requestBody.credential_type = verificationLevel;
-  }
-
-  const signal = toTrimmedString(raw.signal) ?? input.proofPayload.signal;
-  if (signal) {
-    requestBody.signal = signal;
-  }
-
-  const signalHash = toTrimmedString(raw.signal_hash) ?? input.proofPayload.signalHash;
-  if (signalHash) {
-    requestBody.signal_hash = signalHash;
-  } else {
-    const rawSignal = signal;
-    if (rawSignal) {
-      requestBody.signal_hash = hashSignalToField(rawSignal);
-    }
-  }
-
-  const maxAgeRaw = raw.max_age;
-  if (typeof maxAgeRaw === "number" && Number.isFinite(maxAgeRaw)) {
-    requestBody.max_age = Math.floor(maxAgeRaw);
-  } else if (typeof maxAgeRaw === "string" && maxAgeRaw.trim().length > 0) {
-    const parsed = Number.parseInt(maxAgeRaw.trim(), 10);
-    if (Number.isFinite(parsed)) {
-      requestBody.max_age = parsed;
-    }
-  }
-
-  return requestBody;
-}
-
 async function verifyWithWorldCloudV4(input: {
   routeId: string;
   proofPayload: ParsedWorldIdV4ProofPayload;
@@ -701,108 +564,10 @@ async function verifyWithWorldCloudV4(input: {
   });
 }
 
-async function verifyWithWorldCloudV2(input: {
-  appId: string;
-  action: string;
-  proofPayload: ParsedWorldIdLegacyProofPayload;
-}): Promise<VerifyApiResult> {
-  const verifyUrl = `${resolveWorldIdVerifyApiV2Base()}/${input.appId}`;
-  return runWorldVerifyRequest({
-    verifyUrl,
-    requestBody: buildWorldVerifyRequestBodyV2({
-      proofPayload: input.proofPayload,
-      action: input.action
-    })
-  });
-}
-
-function describeVerifyFailure(result: VerifyApiResult): string {
-  const code = result.payload && typeof result.payload.code === "string" ? result.payload.code : "unknown_code";
-  const detail = result.payload && typeof result.payload.detail === "string" ? result.payload.detail : "unknown_detail";
-  return `status=${result.status}, code=${code}, detail=${detail}`;
-}
-
-function legacyProofToV4Payload(input: {
-  proofPayload: ParsedWorldIdLegacyProofPayload;
-  action: string;
-}): ParsedWorldIdV4ProofPayload {
-  const identifier = normalizeWorldIdV3Identifier(input.proofPayload.verificationLevel);
-  const rawPayload: Record<string, unknown> = {
-    protocol_version: "3.0",
-    nonce: `legacy-${Date.now()}-${randomBytes(8).toString("hex")}`,
-    action: input.action,
-    responses: [
-      {
-        identifier,
-        nullifier: input.proofPayload.nullifierHash,
-        nullifier_hash: input.proofPayload.nullifierHash,
-        merkle_root: input.proofPayload.merkleRoot,
-        proof: input.proofPayload.proof,
-        verification_level: input.proofPayload.verificationLevel
-      }
-    ]
-  };
-  if (input.proofPayload.signal) {
-    rawPayload.signal = input.proofPayload.signal;
-  }
-  if (input.proofPayload.signalHash) {
-    (rawPayload.responses as Array<Record<string, unknown>>)[0].signal_hash = input.proofPayload.signalHash;
-  }
-
-  return {
-    mode: "v4",
-    rawPayload,
-    nullifierHash: input.proofPayload.nullifierHash,
-    verificationLevel: input.proofPayload.verificationLevel,
-    action: input.action
-  };
-}
-
 async function verifyWithWorldCloud(input: {
   appId: string;
-  action: string;
   proofPayload: ParsedWorldIdProofPayload;
 }): Promise<VerifyApiResult> {
-  if (input.proofPayload.mode === "v2") {
-    // Prefer World ID 4.0 route when available, even for legacy-shaped proofs.
-    const v4RouteId = resolveWorldIdVerifyV4RouteId(input.appId);
-    let v4Attempt: VerifyApiResult | null = null;
-    if (v4RouteId) {
-      v4Attempt = await verifyWithWorldCloudV4({
-        routeId: v4RouteId,
-        proofPayload: legacyProofToV4Payload({
-          proofPayload: input.proofPayload,
-          action: input.action
-        })
-      });
-      if (v4Attempt.ok) {
-        return v4Attempt;
-      }
-    }
-
-    const v2Attempt = await verifyWithWorldCloudV2({
-      appId: input.appId,
-      action: input.action,
-      proofPayload: input.proofPayload
-    });
-    if (v2Attempt.ok) {
-      return v2Attempt;
-    }
-
-    if (v4Attempt) {
-      return {
-        ok: false,
-        status: v4Attempt.status,
-        payload: {
-          success: false,
-          code: "world_id_verify_failed_all_paths",
-          detail: `v4{${describeVerifyFailure(v4Attempt)}} | v2{${describeVerifyFailure(v2Attempt)}}`
-        }
-      };
-    }
-    return v2Attempt;
-  }
-
   const v4RouteId = resolveWorldIdVerifyV4RouteId(input.appId);
   if (!v4RouteId) {
     return {
@@ -895,7 +660,6 @@ export async function issueWorldIdSessionFromProof(input: {
 
   const verifyResult = await verifyWithWorldCloud({
     appId: selectedProfile.appId,
-    action: selectedProfile.action,
     proofPayload: parsedProof
   });
   if (!verifyResult.ok) {
