@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { getAddress, verifyMessage } from "ethers";
+import { Interface, JsonRpcProvider, getAddress, hashMessage, toUtf8Bytes, verifyMessage } from "ethers";
 import type { MarketRequestInput, OnchainReceipt, RequestStatus, StoredRequest } from "./types";
 import { runCreWorkflow } from "./creRunner";
 import { selectRuntimeNodesForRequest } from "./matcher";
@@ -32,6 +32,11 @@ const WALLET_AUTH_SIGNATURE_HEADER = "x-wallet-auth-signature";
 const WALLET_AUTH_TIMESTAMP_HEADER = "x-wallet-auth-timestamp";
 const DEFAULT_WALLET_AUTH_MAX_AGE_MS = 5 * 60_000;
 const STARTUP_SKIP_ENV_VALIDATION = parseBooleanEnv(process.env.SKIP_STARTUP_ENV_VALIDATION, false);
+const EIP1271_MAGIC_VALUE = "0x1626ba7e";
+const EIP1271_INTERFACE = new Interface([
+  "function isValidSignature(bytes32,bytes) view returns (bytes4)",
+  "function isValidSignature(bytes,bytes) view returns (bytes4)"
+]);
 
 type ServerLogLevel = "info" | "warn" | "error";
 
@@ -825,6 +830,60 @@ function buildWalletAuthMessage(input: {
   ].join("\n");
 }
 
+function resolveRpcUrl(): string | null {
+  const value = process.env.RPC_URL?.trim();
+  return value && value.length > 0 ? value : null;
+}
+
+async function validateEip1271Signature(input: {
+  walletAddress: string;
+  message: string;
+  signature: string;
+}): Promise<boolean> {
+  const rpcUrl = resolveRpcUrl();
+  if (!rpcUrl) {
+    return false;
+  }
+
+  const provider = new JsonRpcProvider(rpcUrl);
+  try {
+    const code = await provider.getCode(input.walletAddress);
+    if (!code || code === "0x") {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+
+  const hash = hashMessage(input.message);
+  try {
+    const result = await provider.call({
+      to: input.walletAddress,
+      data: EIP1271_INTERFACE.encodeFunctionData("isValidSignature(bytes32,bytes)", [hash, input.signature])
+    });
+    const [magic] = EIP1271_INTERFACE.decodeFunctionResult("isValidSignature(bytes32,bytes)", result);
+    if (typeof magic === "string" && magic.toLowerCase() === EIP1271_MAGIC_VALUE) {
+      return true;
+    }
+  } catch {
+    // Try bytes variant below.
+  }
+
+  try {
+    const result = await provider.call({
+      to: input.walletAddress,
+      data: EIP1271_INTERFACE.encodeFunctionData("isValidSignature(bytes,bytes)", [
+        toUtf8Bytes(input.message),
+        input.signature
+      ])
+    });
+    const [magic] = EIP1271_INTERFACE.decodeFunctionResult("isValidSignature(bytes,bytes)", result);
+    return typeof magic === "string" && magic.toLowerCase() === EIP1271_MAGIC_VALUE;
+  } catch {
+    return false;
+  }
+}
+
 async function requireWalletRequestAuth(
   req: Request,
   expectedWalletAddress: string
@@ -915,11 +974,18 @@ async function requireWalletRequestAuth(
   }
 
   if (recovered !== normalizedExpectedWallet) {
-    return {
-      ok: false,
-      status: 401,
-      error: "wallet_auth_signature_mismatch"
-    };
+    const eip1271Valid = await validateEip1271Signature({
+      walletAddress: normalizedExpectedWallet,
+      message,
+      signature
+    });
+    if (!eip1271Valid) {
+      return {
+        ok: false,
+        status: 401,
+        error: "wallet_auth_signature_mismatch"
+      };
+    }
   }
 
   return { ok: true };
