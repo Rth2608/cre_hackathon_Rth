@@ -94,6 +94,10 @@ const externalWorldIdEnvironment = (() => {
   const raw = (import.meta.env.VITE_WORLD_ID_EXTERNAL_ENVIRONMENT || "staging").trim().toLowerCase();
   return raw === "production" ? "production" : "staging";
 })();
+const forceExternalWorldId = (() => {
+  const raw = String(import.meta.env.VITE_WORLD_ID_FORCE_EXTERNAL ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+})();
 
 function formatShortAddress(value: string): string {
   const trimmed = value.trim();
@@ -531,7 +535,8 @@ export default function SubmitPage() {
   const miniWorldIdConfigured = worldIdConfig.mini.configured;
   const externalWorldIdConfigured = worldIdConfig.external.configured;
   const worldChainVirtualConfig = getWorldChainVirtualConfig();
-  const worldAppMiniRuntime = getWorldAppRuntimeMode() === "miniapp";
+  const worldAppMiniRuntimeDetected = getWorldAppRuntimeMode() === "miniapp";
+  const worldAppMiniRuntime = worldAppMiniRuntimeDetected && !forceExternalWorldId;
   const worldIdConfigured = worldAppMiniRuntime ? miniWorldIdConfigured : externalWorldIdConfigured;
 
   const [form, setForm] = useState(defaultForm);
@@ -968,6 +973,11 @@ export default function SubmitPage() {
               ? "In World App: Submit triggers in-app World ID verification before queueing."
               : "In Web: Submit opens external World ID widget (simulator-compatible) before queueing."}
           </p>
+          {forceExternalWorldId && worldAppMiniRuntimeDetected && (
+            <p className="config-warning runtime-note">
+              External mode is forced by <code>VITE_WORLD_ID_FORCE_EXTERNAL</code>. MiniKit path is bypassed.
+            </p>
+          )}
           <div className="wallet-row">
             {thirdwebConfigured ? (
               <ConnectButton
