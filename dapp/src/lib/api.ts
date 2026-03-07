@@ -1,5 +1,6 @@
 import { signMessage } from "thirdweb/utils";
 import type { Account } from "thirdweb/wallets";
+import { MiniKit } from "@worldcoin/minikit-js";
 
 export type NodeId = string;
 
@@ -234,6 +235,14 @@ const API_TIMEOUT_MS = (() => {
   }
   return Math.floor(raw);
 })();
+const REQUIRE_WALLET_AUTH_SIGNATURE = (() => {
+  const raw = String(import.meta.env.VITE_REQUIRE_WALLET_AUTH_SIGNATURE ?? "").trim();
+  if (!raw) return true;
+  const normalized = raw.toLowerCase();
+  if (["false", "0", "no", "off"].includes(normalized)) return false;
+  if (["true", "1", "yes", "on"].includes(normalized)) return true;
+  return true;
+})();
 
 const WALLET_AUTH_SIGNATURE_HEADER = "x-wallet-auth-signature";
 const WALLET_AUTH_TIMESTAMP_HEADER = "x-wallet-auth-timestamp";
@@ -257,12 +266,60 @@ function buildWalletAuthMessage(input: {
   ].join("\n");
 }
 
+function toError(value: unknown): Error {
+  if (value instanceof Error) {
+    return value;
+  }
+  return new Error(String(value));
+}
+
+function shouldFallbackToMiniKitSign(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /Missing or invalid\.\s*request\(\)\s*chainId/i.test(message);
+}
+
+async function signWithMiniKitFallback(input: {
+  message: string;
+  walletAddress: string;
+}): Promise<string> {
+  if (typeof window === "undefined") {
+    throw new Error("minikit_sign_unavailable: no_window");
+  }
+  if (!MiniKit.isInstalled()) {
+    throw new Error("minikit_sign_unavailable: not_installed");
+  }
+
+  const { finalPayload } = await MiniKit.commandsAsync.signMessage({
+    message: input.message
+  });
+  const payload = finalPayload as Record<string, unknown> | null;
+  if (!payload || payload.status !== "success") {
+    const detail = payload && typeof payload.error_code === "string" ? payload.error_code : "unknown";
+    throw new Error(`minikit_sign_failed: ${detail}`);
+  }
+  const signature = typeof payload.signature === "string" ? payload.signature.trim() : "";
+  const signerAddress = typeof payload.address === "string" ? payload.address.trim().toLowerCase() : "";
+  if (!signature) {
+    throw new Error("minikit_sign_failed: empty_signature");
+  }
+  if (signerAddress && signerAddress !== input.walletAddress.trim().toLowerCase()) {
+    throw new Error("minikit_sign_failed: signer_wallet_mismatch");
+  }
+  return signature;
+}
+
 async function buildWalletAuthHeaders(input: {
   account: Account;
   walletAddress: string;
   method: string;
   path: string;
 }): Promise<Record<string, string>> {
+  if (!REQUIRE_WALLET_AUTH_SIGNATURE) {
+    return {
+      "x-wallet-address": toLowerAddress(input.walletAddress)
+    };
+  }
+
   const timestamp = String(Date.now());
   const message = buildWalletAuthMessage({
     walletAddress: input.walletAddress,
@@ -270,10 +327,22 @@ async function buildWalletAuthHeaders(input: {
     path: input.path,
     timestamp
   });
-  const signature = await signMessage({
-    account: input.account,
-    message
-  });
+  let signature: string;
+  try {
+    signature = await signMessage({
+      account: input.account,
+      message
+    });
+  } catch (error) {
+    if (!shouldFallbackToMiniKitSign(error)) {
+      throw toError(error);
+    }
+    signature = await signWithMiniKitFallback({
+      message,
+      walletAddress: input.walletAddress
+    });
+  }
+
   return {
     "x-wallet-address": toLowerAddress(input.walletAddress),
     [WALLET_AUTH_SIGNATURE_HEADER]: signature,
