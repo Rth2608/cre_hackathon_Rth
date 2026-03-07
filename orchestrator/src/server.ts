@@ -821,9 +821,10 @@ function buildWalletAuthMessage(input: {
   path: string;
   timestamp: string;
 }): string {
+  const normalizedWallet = input.walletAddress.trim().toLowerCase();
   return [
     "CRE Wallet Auth v1",
-    `wallet: ${input.walletAddress}`,
+    `wallet: ${normalizedWallet}`,
     `method: ${input.method.toUpperCase()}`,
     `path: ${input.path}`,
     `timestamp: ${input.timestamp}`
