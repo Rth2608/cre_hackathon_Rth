@@ -629,11 +629,13 @@ export default function SubmitPage() {
     worldIdSession && Number.isFinite(Date.parse(worldIdSession.expiresAt))
       ? formatRemainingDuration(Date.parse(worldIdSession.expiresAt) - Date.now())
       : "-";
-  const requestSubmitReady = requestCreateReady && worldIdConfigured;
+  const requestSubmitReady = requestCreateReady && worldIdConfigured && !connectedChainMismatch;
   const requestSubmitReason = !walletConnected
     ? "Connect wallet"
     : !thirdwebConfigured
       ? "Set VITE_THIRDWEB_CLIENT_ID"
+      : connectedChainMismatch
+        ? `Switch wallet chain to ${worldChainVirtualConfig.chainName} (${worldChainVirtualConfig.chainId})`
       : !worldIdConfigured
         ? "Configure World ID app/action env"
         : "Ready (World ID required per submit)";
@@ -873,6 +875,13 @@ export default function SubmitPage() {
       return;
     }
 
+    if (connectedChainMismatch) {
+      setError(`wallet_chain_mismatch: switch wallet chain to ${worldChainVirtualConfig.chainName} (${worldChainVirtualConfig.chainId})`);
+      window.clearTimeout(submitTimeoutId);
+      setSubmitting(false);
+      return;
+    }
+
     try {
       clearWorldIdSession(walletAddress);
       setWorldIdSession(null);
@@ -1098,7 +1107,7 @@ export default function SubmitPage() {
           </label>
 
           <div className="action-row">
-            <button type="submit" disabled={submitting || !walletConnected || !thirdwebConfigured || !worldIdConfigured}>
+            <button type="submit" disabled={submitting || !walletConnected || !thirdwebConfigured || !worldIdConfigured || connectedChainMismatch}>
               {submitting
                 ? "Verifying And Queueing..."
                 : worldAppMiniRuntime
