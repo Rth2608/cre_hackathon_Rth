@@ -862,6 +862,18 @@ function parseSiweField(message: string, label: string): string | null {
   return match?.[1]?.trim() ?? null;
 }
 
+function parseSiweChainId(message: string): number | undefined {
+  const chainIdRaw = parseSiweField(message, "Chain ID");
+  if (!chainIdRaw) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(chainIdRaw, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return undefined;
+  }
+  return parsed;
+}
+
 function buildEip191PrefixedMessage(message: string): string {
   return `\x19Ethereum Signed Message:\n${message.length}${message}`;
 }
@@ -895,12 +907,46 @@ function resolveRpcUrl(): string | null {
   return value && value.length > 0 ? value : null;
 }
 
+function resolveWalletAuthRpcUrl(chainId?: number): string | null {
+  const mapRaw = process.env.WALLET_AUTH_RPC_URL_BY_CHAIN_JSON?.trim();
+  if (mapRaw && chainId) {
+    try {
+      const parsed = JSON.parse(mapRaw) as Record<string, unknown>;
+      const mapped = parsed[String(chainId)];
+      if (typeof mapped === "string" && mapped.trim()) {
+        return mapped.trim();
+      }
+    } catch {
+      // Ignore malformed map and continue fallback resolution.
+    }
+  }
+
+  if (chainId === 480) {
+    const configured = process.env.WALLET_AUTH_WORLDCHAIN_MAINNET_RPC_URL?.trim();
+    if (configured) {
+      return configured;
+    }
+    return "https://worldchain-mainnet.g.alchemy.com/public";
+  }
+
+  if (chainId === 4801) {
+    const configured = process.env.WALLET_AUTH_WORLDCHAIN_SEPOLIA_RPC_URL?.trim();
+    if (configured) {
+      return configured;
+    }
+    return "https://worldchain-sepolia.g.alchemy.com/public";
+  }
+
+  return resolveRpcUrl();
+}
+
 async function validateEip1271Signature(input: {
   walletAddress: string;
   message: string;
   signature: string;
+  rpcUrl?: string | null;
 }): Promise<boolean> {
-  const rpcUrl = resolveRpcUrl();
+  const rpcUrl = input.rpcUrl && input.rpcUrl.trim() ? input.rpcUrl.trim() : resolveRpcUrl();
   if (!rpcUrl) {
     return false;
   }
@@ -944,8 +990,12 @@ async function validateEip1271Signature(input: {
   }
 }
 
-async function validateSafeOwnerSignature(input: { walletAddress: string; ownerAddress: string }): Promise<boolean> {
-  const rpcUrl = resolveRpcUrl();
+async function validateSafeOwnerSignature(input: {
+  walletAddress: string;
+  ownerAddress: string;
+  rpcUrl?: string | null;
+}): Promise<boolean> {
+  const rpcUrl = input.rpcUrl && input.rpcUrl.trim() ? input.rpcUrl.trim() : resolveRpcUrl();
   if (!rpcUrl) {
     return false;
   }
@@ -1002,6 +1052,9 @@ async function validateSiweWalletAuth(input: {
       detail: `siwe_address_mismatch: expected=${input.expectedWalletAddress}, siwe=${normalizedSiweAddress}`
     };
   }
+
+  const siweChainId = parseSiweChainId(input.message);
+  const siweRpcUrl = resolveWalletAuthRpcUrl(siweChainId);
 
   if (input.declaredAddress) {
     try {
@@ -1062,7 +1115,8 @@ async function validateSiweWalletAuth(input: {
   for (const recovered of recoveredCandidates) {
     const isOwner = await validateSafeOwnerSignature({
       walletAddress: normalizedSiweAddress,
-      ownerAddress: recovered
+      ownerAddress: recovered,
+      rpcUrl: siweRpcUrl
     });
     if (isOwner) {
       safeOwnerRecovered = recovered;
@@ -1077,7 +1131,8 @@ async function validateSiweWalletAuth(input: {
   const eip1271Valid = await validateEip1271Signature({
     walletAddress: normalizedSiweAddress,
     message: input.message,
-    signature: input.signature
+    signature: input.signature,
+    rpcUrl: siweRpcUrl
   });
   if (eip1271Valid) {
     return { ok: true };
@@ -1086,7 +1141,7 @@ async function validateSiweWalletAuth(input: {
   const recoveredDetail = recoveredCandidates.length > 0 ? recoveredCandidates.join(",") : "none";
   return {
     ok: false,
-    detail: `siwe_signature_mismatch: expected=${normalizedSiweAddress}, recovered=${recoveredDetail}, eip1271=${eip1271Valid}, safeOwner=${safeOwnerValid}, version=${input.siweVersion ?? "unknown"}`
+    detail: `siwe_signature_mismatch: expected=${normalizedSiweAddress}, recovered=${recoveredDetail}, eip1271=${eip1271Valid}, safeOwner=${safeOwnerValid}, version=${input.siweVersion ?? "unknown"}, chainId=${siweChainId ?? "unknown"}`
   };
 }
 
