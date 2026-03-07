@@ -160,13 +160,100 @@ function hasWorldIdProofMaterial(value: Record<string, unknown>): boolean {
   return false;
 }
 
-function buildWorldProofFromIdKit(result: ISuccessResult): Record<string, unknown> {
+function readLegacyWorldIdProofPayload(
+  value: Record<string, unknown>
+): { merkleRoot: string; nullifierHash: string; proof: string; verificationLevel?: string } | null {
+  const readCandidate = (
+    candidate: Record<string, unknown>
+  ): { merkleRoot: string; nullifierHash: string; proof: string; verificationLevel?: string } | null => {
+    const proof = typeof candidate.proof === "string" ? candidate.proof.trim() : "";
+    const nullifierHashRaw =
+      typeof candidate.nullifier_hash === "string"
+        ? candidate.nullifier_hash
+        : typeof candidate.nullifier === "string"
+          ? candidate.nullifier
+          : "";
+    const nullifierHash = nullifierHashRaw.trim();
+    const merkleRoot = typeof candidate.merkle_root === "string" ? candidate.merkle_root.trim() : "";
+    const verificationLevelRaw =
+      typeof candidate.verification_level === "string"
+        ? candidate.verification_level
+        : typeof candidate.credential_type === "string"
+          ? candidate.credential_type
+          : undefined;
+    const verificationLevel = verificationLevelRaw?.trim();
+
+    if (!proof || !nullifierHash || !merkleRoot) {
+      return null;
+    }
+
+    return {
+      merkleRoot,
+      nullifierHash,
+      proof,
+      verificationLevel
+    };
+  };
+
+  const topLevel = readCandidate(value);
+  if (topLevel) {
+    return topLevel;
+  }
+
+  if (value.result && typeof value.result === "object" && !Array.isArray(value.result)) {
+    const nestedResult = readCandidate(value.result as Record<string, unknown>);
+    if (nestedResult) {
+      return nestedResult;
+    }
+  }
+
+  if (Array.isArray(value.responses)) {
+    for (const entry of value.responses) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        continue;
+      }
+      const nestedResponse = readCandidate(entry as Record<string, unknown>);
+      if (nestedResponse) {
+        return nestedResponse;
+      }
+    }
+  }
+
+  return null;
+}
+
+function buildWorldProofFromIdKit(
+  result: ISuccessResult,
+  input: { action: string; signal: string }
+): Record<string, unknown> {
   const rawResult = result as unknown as Record<string, unknown>;
-  if (!looksLikeWorldIdV4ProofPayload(rawResult) || !hasWorldIdProofMaterial(rawResult)) {
+  if (looksLikeWorldIdV4ProofPayload(rawResult) && hasWorldIdProofMaterial(rawResult)) {
+    // World ID 4.0: forward completion payload as-is to backend verify.
+    return rawResult;
+  }
+
+  const legacyPayload = readLegacyWorldIdProofPayload(rawResult);
+  if (!legacyPayload) {
     throw new Error("world_id_v4_payload_required: external_widget_returned_legacy_payload");
   }
-  // World ID 4.0: forward completion payload as-is to backend verify.
-  return rawResult;
+
+  const identifier = resolveWorldIdCredentialIdentifier(legacyPayload.verificationLevel);
+  return {
+    protocol_version: "3.0",
+    nonce: `idkit-${Date.now()}-${Math.random()}`,
+    action: input.action,
+    signal: input.signal,
+    responses: [
+      {
+        identifier,
+        nullifier: legacyPayload.nullifierHash,
+        nullifier_hash: legacyPayload.nullifierHash,
+        merkle_root: legacyPayload.merkleRoot,
+        proof: legacyPayload.proof,
+        verification_level: legacyPayload.verificationLevel
+      }
+    ]
+  };
 }
 
 function readLegacyMiniKitProofPayload(
@@ -940,7 +1027,10 @@ export default function VerifyPage() {
     });
     setVerifyingWorldId(true);
     try {
-      const proof = buildWorldProofFromIdKit(result);
+      const proof = buildWorldProofFromIdKit(result, {
+        action: worldIdConfig.external.action,
+        signal: walletAddress
+      });
       appendWorldIdDebugLog("external.verify.proof", summarizeWorldProof(proof));
       await verifyWorldIdWithProof({
         proof,
