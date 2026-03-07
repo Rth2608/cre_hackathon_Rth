@@ -246,6 +246,10 @@ const REQUIRE_WALLET_AUTH_SIGNATURE = (() => {
 
 const WALLET_AUTH_SIGNATURE_HEADER = "x-wallet-auth-signature";
 const WALLET_AUTH_TIMESTAMP_HEADER = "x-wallet-auth-timestamp";
+const WALLET_AUTH_SIWE_MESSAGE_HEADER = "x-wallet-auth-siwe-message";
+const WALLET_AUTH_SIWE_SIGNATURE_HEADER = "x-wallet-auth-siwe-signature";
+const WALLET_AUTH_SIWE_ADDRESS_HEADER = "x-wallet-auth-siwe-address";
+const WALLET_AUTH_SIWE_REQUEST_ID_HEADER = "x-wallet-auth-siwe-request-id";
 
 function toLowerAddress(value: string): string {
   return value.trim().toLowerCase();
@@ -271,6 +275,21 @@ function extractEvmAddress(value: unknown): string | undefined {
     return toLowerAddress(match[0]);
   }
   return undefined;
+}
+
+function normalizeHexSignature(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  return trimmed.startsWith("0x") ? trimmed : `0x${trimmed}`;
+}
+
+function encodeBase64Utf8(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 1) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
 }
 
 function resolveAuthWalletAddress(walletAddress: string, account?: Account): string {
@@ -342,8 +361,45 @@ async function signWithMiniKitFallback(input: {
   }
   const signerAddress = extractEvmAddress(payload.address);
   return {
-    signature,
+    signature: normalizeHexSignature(signature),
     signerAddress
+  };
+}
+
+async function walletAuthWithMiniKit(input: {
+  nonce: string;
+  requestId: string;
+}): Promise<{ message: string; signature: string; walletAddress?: string }> {
+  if (typeof window === "undefined") {
+    throw new Error("minikit_wallet_auth_unavailable: no_window");
+  }
+  if (!MiniKit.isInstalled()) {
+    throw new Error("minikit_wallet_auth_unavailable: not_installed");
+  }
+
+  const { finalPayload } = await MiniKit.commandsAsync.walletAuth({
+    nonce: input.nonce,
+    statement: "CRE Wallet Auth v1",
+    requestId: input.requestId
+  });
+  const payload = finalPayload as Record<string, unknown> | null;
+  if (!payload || payload.status !== "success") {
+    const detail = payload && typeof payload.error_code === "string" ? payload.error_code : "unknown";
+    throw new Error(`minikit_wallet_auth_failed: ${detail}`);
+  }
+  const message = typeof payload.message === "string" ? payload.message : "";
+  const signatureRaw = typeof payload.signature === "string" ? payload.signature : "";
+  const signature = normalizeHexSignature(signatureRaw);
+  if (!message.trim()) {
+    throw new Error("minikit_wallet_auth_failed: empty_message");
+  }
+  if (!signature) {
+    throw new Error("minikit_wallet_auth_failed: empty_signature");
+  }
+  return {
+    message,
+    signature,
+    walletAddress: extractEvmAddress(payload.address)
   };
 }
 
@@ -365,6 +421,28 @@ async function buildWalletAuthHeaders(input: {
 
   const timestamp = String(Date.now());
   let effectiveWalletAddress = requestedWalletAddress;
+  if (MiniKit.isInstalled()) {
+    const requestId = `${input.method.toUpperCase()}:${input.path}`;
+    const walletAuth = await walletAuthWithMiniKit({
+      nonce: timestamp,
+      requestId
+    });
+    if (walletAuth.walletAddress) {
+      effectiveWalletAddress = walletAuth.walletAddress;
+    }
+    return {
+      headers: {
+        "x-wallet-address": effectiveWalletAddress,
+        [WALLET_AUTH_TIMESTAMP_HEADER]: timestamp,
+        [WALLET_AUTH_SIWE_MESSAGE_HEADER]: encodeBase64Utf8(walletAuth.message),
+        [WALLET_AUTH_SIWE_SIGNATURE_HEADER]: walletAuth.signature,
+        [WALLET_AUTH_SIWE_ADDRESS_HEADER]: walletAuth.walletAddress ?? effectiveWalletAddress,
+        [WALLET_AUTH_SIWE_REQUEST_ID_HEADER]: requestId
+      },
+      walletAddress: effectiveWalletAddress
+    };
+  }
+
   let message = buildWalletAuthMessage({
     walletAddress: effectiveWalletAddress,
     method: input.method,
@@ -387,21 +465,18 @@ async function buildWalletAuthHeaders(input: {
     return fallback.signature;
   };
   let signature: string;
-  if (MiniKit.isInstalled()) {
-    signature = await signWithMiniKitAndAlign();
-  } else {
-    try {
-      signature = await signMessage({
-        account: input.account,
-        message
-      });
-    } catch (error) {
-      if (!shouldFallbackToMiniKitSign(error)) {
-        throw toError(error);
-      }
-      signature = await signWithMiniKitAndAlign();
+  try {
+    signature = await signMessage({
+      account: input.account,
+      message
+    });
+  } catch (error) {
+    if (!shouldFallbackToMiniKitSign(error)) {
+      throw toError(error);
     }
+    signature = await signWithMiniKitAndAlign();
   }
+  signature = normalizeHexSignature(signature);
 
   return {
     headers: {
