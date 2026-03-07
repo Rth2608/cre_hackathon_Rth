@@ -255,7 +255,14 @@ function isLikelyEvmAddress(value: string): boolean {
   return /^0x[a-fA-F0-9]{40}$/.test(value.trim());
 }
 
-function resolveAuthWalletAddress(walletAddress: string): string {
+function resolveAuthWalletAddress(walletAddress: string, account?: Account): string {
+  const accountWalletRaw =
+    typeof (account as { address?: unknown } | undefined)?.address === "string"
+      ? ((account as { address?: string }).address ?? "")
+      : "";
+  if (isLikelyEvmAddress(accountWalletRaw)) {
+    return toLowerAddress(accountWalletRaw);
+  }
   const miniWalletRaw = MiniKit.user?.walletAddress;
   if (typeof miniWalletRaw === "string" && isLikelyEvmAddress(miniWalletRaw)) {
     return toLowerAddress(miniWalletRaw);
@@ -292,8 +299,7 @@ function shouldFallbackToMiniKitSign(error: unknown): boolean {
 
 async function signWithMiniKitFallback(input: {
   message: string;
-  walletAddress: string;
-}): Promise<string> {
+}): Promise<{ signature: string; signerAddress?: string }> {
   if (typeof window === "undefined") {
     throw new Error("minikit_sign_unavailable: no_window");
   }
@@ -313,9 +319,12 @@ async function signWithMiniKitFallback(input: {
   if (!signature) {
     throw new Error("minikit_sign_failed: empty_signature");
   }
-  // World App payload shape can vary (EOA, smart wallet, or CAIP-like identifiers).
-  // Let backend signature verification be the source of truth for wallet binding.
-  return signature;
+  const signerAddressRaw = typeof payload.address === "string" ? payload.address.trim() : "";
+  const signerAddress = isLikelyEvmAddress(signerAddressRaw) ? toLowerAddress(signerAddressRaw) : undefined;
+  return {
+    signature,
+    signerAddress
+  };
 }
 
 async function buildWalletAuthHeaders(input: {
@@ -323,16 +332,21 @@ async function buildWalletAuthHeaders(input: {
   walletAddress: string;
   method: string;
   path: string;
-}): Promise<Record<string, string>> {
+}): Promise<{ headers: Record<string, string>; walletAddress: string }> {
+  const requestedWalletAddress = resolveAuthWalletAddress(input.walletAddress, input.account);
   if (!REQUIRE_WALLET_AUTH_SIGNATURE) {
     return {
-      "x-wallet-address": toLowerAddress(input.walletAddress)
+      headers: {
+        "x-wallet-address": requestedWalletAddress
+      },
+      walletAddress: requestedWalletAddress
     };
   }
 
   const timestamp = String(Date.now());
-  const message = buildWalletAuthMessage({
-    walletAddress: input.walletAddress,
+  let effectiveWalletAddress = requestedWalletAddress;
+  let message = buildWalletAuthMessage({
+    walletAddress: effectiveWalletAddress,
     method: input.method,
     path: input.path,
     timestamp
@@ -347,16 +361,29 @@ async function buildWalletAuthHeaders(input: {
     if (!shouldFallbackToMiniKitSign(error)) {
       throw toError(error);
     }
-    signature = await signWithMiniKitFallback({
-      message,
-      walletAddress: input.walletAddress
-    });
+    const fallback = await signWithMiniKitFallback({ message });
+    if (fallback.signerAddress && fallback.signerAddress !== effectiveWalletAddress) {
+      effectiveWalletAddress = fallback.signerAddress;
+      message = buildWalletAuthMessage({
+        walletAddress: effectiveWalletAddress,
+        method: input.method,
+        path: input.path,
+        timestamp
+      });
+      const corrected = await signWithMiniKitFallback({ message });
+      signature = corrected.signature;
+    } else {
+      signature = fallback.signature;
+    }
   }
 
   return {
-    "x-wallet-address": toLowerAddress(input.walletAddress),
-    [WALLET_AUTH_SIGNATURE_HEADER]: signature,
-    [WALLET_AUTH_TIMESTAMP_HEADER]: timestamp
+    headers: {
+      "x-wallet-address": effectiveWalletAddress,
+      [WALLET_AUTH_SIGNATURE_HEADER]: signature,
+      [WALLET_AUTH_TIMESTAMP_HEADER]: timestamp
+    },
+    walletAddress: effectiveWalletAddress
   };
 }
 
@@ -487,23 +514,23 @@ export async function createRequestForWallet(
   if (!account) {
     throw new Error("wallet_account_required");
   }
-  const authWalletAddress = resolveAuthWalletAddress(walletAddress);
-  const requestInput: MarketRequestInput = {
-    ...input,
-    submitterAddress: authWalletAddress
-  };
-  const authHeaders = await buildWalletAuthHeaders({
+  const authWalletAddress = resolveAuthWalletAddress(walletAddress, account);
+  const auth = await buildWalletAuthHeaders({
     account,
     walletAddress: authWalletAddress,
     method: "POST",
     path: "/api/requests"
   });
+  const requestInput: MarketRequestInput = {
+    ...input,
+    submitterAddress: auth.walletAddress
+  };
   return requestJson<RequestRecord>("/api/requests", {
     method: "POST",
     headers: appendWorldIdTokenHeader(
       {
-        ...authHeaders,
-        "payment-signature": authHeaders[WALLET_AUTH_SIGNATURE_HEADER] ?? ""
+        ...auth.headers,
+        "payment-signature": auth.headers[WALLET_AUTH_SIGNATURE_HEADER] ?? ""
       },
       worldIdToken
     ),
@@ -550,9 +577,9 @@ export async function runVerificationForWallet(
   if (!account) {
     throw new Error("wallet_account_required");
   }
-  const authWalletAddress = resolveAuthWalletAddress(walletAddress);
+  const authWalletAddress = resolveAuthWalletAddress(walletAddress, account);
   const path = `/api/requests/${encodeURIComponent(requestId)}/run-verification`;
-  const authHeaders = await buildWalletAuthHeaders({
+  const auth = await buildWalletAuthHeaders({
     account,
     walletAddress: authWalletAddress,
     method: "POST",
@@ -562,8 +589,8 @@ export async function runVerificationForWallet(
     method: "POST",
     headers: appendWorldIdTokenHeader(
       {
-        ...authHeaders,
-        "payment-signature": authHeaders[WALLET_AUTH_SIGNATURE_HEADER] ?? ""
+        ...auth.headers,
+        "payment-signature": auth.headers[WALLET_AUTH_SIGNATURE_HEADER] ?? ""
       },
       worldIdToken
     )
@@ -613,23 +640,23 @@ export async function registerNode(input: {
   if (!account) {
     throw new Error("wallet_account_required");
   }
-  const authWalletAddress = resolveAuthWalletAddress(input.walletAddress);
-  const requestInput = {
-    ...input,
-    walletAddress: authWalletAddress
-  };
-  const authHeaders = await buildWalletAuthHeaders({
+  const authWalletAddress = resolveAuthWalletAddress(input.walletAddress, account);
+  const auth = await buildWalletAuthHeaders({
     account,
-    walletAddress: requestInput.walletAddress,
+    walletAddress: authWalletAddress,
     method: "POST",
     path: "/api/nodes/register"
   });
+  const requestInput = {
+    ...input,
+    walletAddress: auth.walletAddress
+  };
   return requestJson<{ node: RegisteredNode; paymentReceipt: VerificationPaymentReceipt }>("/api/nodes/register", {
     method: "POST",
     headers: appendWorldIdTokenHeader(
       {
-        ...authHeaders,
-        "payment-signature": authHeaders[WALLET_AUTH_SIGNATURE_HEADER] ?? ""
+        ...auth.headers,
+        "payment-signature": auth.headers[WALLET_AUTH_SIGNATURE_HEADER] ?? ""
       },
       requestInput.worldIdToken
     ),
@@ -653,25 +680,25 @@ export async function requestNodeChallenge(input: {
   if (!account) {
     throw new Error("wallet_account_required");
   }
-  const authWalletAddress = resolveAuthWalletAddress(input.walletAddress);
-  const requestInput = {
-    ...input,
-    walletAddress: authWalletAddress
-  };
-  const authHeaders = await buildWalletAuthHeaders({
+  const authWalletAddress = resolveAuthWalletAddress(input.walletAddress, account);
+  const auth = await buildWalletAuthHeaders({
     account,
-    walletAddress: requestInput.walletAddress,
+    walletAddress: authWalletAddress,
     method: "POST",
     path: "/api/nodes/challenge"
   });
+  const requestInput = {
+    ...input,
+    walletAddress: auth.walletAddress
+  };
   return requestJson<{ challenge: NodeRegistrationChallenge; paymentReceipt: VerificationPaymentReceipt }>(
     "/api/nodes/challenge",
     {
       method: "POST",
       headers: appendWorldIdTokenHeader(
         {
-          ...authHeaders,
-          "payment-signature": authHeaders[WALLET_AUTH_SIGNATURE_HEADER] ?? ""
+          ...auth.headers,
+          "payment-signature": auth.headers[WALLET_AUTH_SIGNATURE_HEADER] ?? ""
         },
         requestInput.worldIdToken
       ),
@@ -691,8 +718,8 @@ export async function verifyWorldIdForWallet(input: {
   if (!input.account) {
     throw new Error("wallet_account_required");
   }
-  const authWalletAddress = resolveAuthWalletAddress(input.walletAddress);
-  const authHeaders = await buildWalletAuthHeaders({
+  const authWalletAddress = resolveAuthWalletAddress(input.walletAddress, input.account);
+  const auth = await buildWalletAuthHeaders({
     account: input.account,
     walletAddress: authWalletAddress,
     method: "POST",
@@ -700,9 +727,9 @@ export async function verifyWorldIdForWallet(input: {
   });
   return requestJson<{ session: WorldIdSession }>("/api/world-id/verify", {
     method: "POST",
-    headers: authHeaders,
+    headers: auth.headers,
     body: JSON.stringify({
-      walletAddress: authWalletAddress,
+      walletAddress: auth.walletAddress,
       proof: input.proof,
       appId: input.appId,
       action: input.action,
@@ -726,17 +753,17 @@ export async function activateNodeChallenge(input: {
   if (!account) {
     throw new Error("wallet_account_required");
   }
-  const authWalletAddress = resolveAuthWalletAddress(input.walletAddress);
-  const requestInput = {
-    ...input,
-    walletAddress: authWalletAddress
-  };
-  const authHeaders = await buildWalletAuthHeaders({
+  const authWalletAddress = resolveAuthWalletAddress(input.walletAddress, account);
+  const auth = await buildWalletAuthHeaders({
     account,
-    walletAddress: requestInput.walletAddress,
+    walletAddress: authWalletAddress,
     method: "POST",
     path: "/api/nodes/activate"
   });
+  const requestInput = {
+    ...input,
+    walletAddress: auth.walletAddress
+  };
   return requestJson<{
     node: RegisteredNode;
     challenge: NodeRegistrationChallenge;
@@ -744,7 +771,7 @@ export async function activateNodeChallenge(input: {
     lifecycleOnchainReceipt?: RequestRecord["onchainReceipt"];
   }>("/api/nodes/activate", {
     method: "POST",
-    headers: authHeaders,
+    headers: auth.headers,
     body: JSON.stringify(requestInput)
   });
 }
@@ -765,17 +792,17 @@ export async function sendNodeHeartbeat(input: {
   if (!account) {
     throw new Error("wallet_account_required");
   }
-  const authWalletAddress = resolveAuthWalletAddress(input.walletAddress);
-  const requestInput = {
-    ...input,
-    walletAddress: authWalletAddress
-  };
-  const authHeaders = await buildWalletAuthHeaders({
+  const authWalletAddress = resolveAuthWalletAddress(input.walletAddress, account);
+  const auth = await buildWalletAuthHeaders({
     account,
-    walletAddress: requestInput.walletAddress,
+    walletAddress: authWalletAddress,
     method: "POST",
     path: "/api/nodes/heartbeat"
   });
+  const requestInput = {
+    ...input,
+    walletAddress: auth.walletAddress
+  };
   return requestJson<{
     node: RegisteredNode;
     endpointProbe?: NodeEndpointProbe;
@@ -785,7 +812,7 @@ export async function sendNodeHeartbeat(input: {
     "/api/nodes/heartbeat",
     {
       method: "POST",
-      headers: authHeaders,
+      headers: auth.headers,
       body: JSON.stringify(requestInput)
     }
   );
