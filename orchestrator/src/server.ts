@@ -37,6 +37,7 @@ const EIP1271_INTERFACE = new Interface([
   "function isValidSignature(bytes32,bytes) view returns (bytes4)",
   "function isValidSignature(bytes,bytes) view returns (bytes4)"
 ]);
+const SAFE_OWNER_INTERFACE = new Interface(["function isOwner(address) view returns (bool)"]);
 
 type ServerLogLevel = "info" | "warn" | "error";
 
@@ -885,6 +886,34 @@ async function validateEip1271Signature(input: {
   }
 }
 
+async function validateSafeOwnerSignature(input: { walletAddress: string; ownerAddress: string }): Promise<boolean> {
+  const rpcUrl = resolveRpcUrl();
+  if (!rpcUrl) {
+    return false;
+  }
+
+  const provider = new JsonRpcProvider(rpcUrl);
+  try {
+    const code = await provider.getCode(input.walletAddress);
+    if (!code || code === "0x") {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+
+  try {
+    const result = await provider.call({
+      to: input.walletAddress,
+      data: SAFE_OWNER_INTERFACE.encodeFunctionData("isOwner", [input.ownerAddress])
+    });
+    const [isOwner] = SAFE_OWNER_INTERFACE.decodeFunctionResult("isOwner", result);
+    return isOwner === true;
+  } catch {
+    return false;
+  }
+}
+
 async function requireWalletRequestAuth(
   req: Request,
   expectedWalletAddress: string
@@ -980,12 +1009,18 @@ async function requireWalletRequestAuth(
       message,
       signature
     });
-    if (!eip1271Valid) {
+    const safeOwnerValid = !eip1271Valid
+      ? await validateSafeOwnerSignature({
+          walletAddress: normalizedExpectedWallet,
+          ownerAddress: recovered
+        })
+      : false;
+    if (!eip1271Valid && !safeOwnerValid) {
       return {
         ok: false,
         status: 401,
         error: "wallet_auth_signature_mismatch",
-        detail: `expected=${normalizedExpectedWallet}, recovered=${recovered}`
+        detail: `expected=${normalizedExpectedWallet}, recovered=${recovered}, eip1271=${eip1271Valid}, safeOwner=${safeOwnerValid}`
       };
     }
   }
