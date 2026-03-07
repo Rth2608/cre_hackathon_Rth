@@ -984,7 +984,8 @@ async function requireWalletRequestAuth(
       return {
         ok: false,
         status: 401,
-        error: "wallet_auth_signature_mismatch"
+        error: "wallet_auth_signature_mismatch",
+        detail: `expected=${normalizedExpectedWallet}, recovered=${recovered}`
       };
     }
   }

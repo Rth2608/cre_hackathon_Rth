@@ -251,6 +251,18 @@ function toLowerAddress(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function isLikelyEvmAddress(value: string): boolean {
+  return /^0x[a-fA-F0-9]{40}$/.test(value.trim());
+}
+
+function resolveAuthWalletAddress(walletAddress: string): string {
+  const miniWalletRaw = MiniKit.user?.walletAddress;
+  if (typeof miniWalletRaw === "string" && isLikelyEvmAddress(miniWalletRaw)) {
+    return toLowerAddress(miniWalletRaw);
+  }
+  return toLowerAddress(walletAddress);
+}
+
 function buildWalletAuthMessage(input: {
   walletAddress: string;
   method: string;
@@ -475,9 +487,14 @@ export async function createRequestForWallet(
   if (!account) {
     throw new Error("wallet_account_required");
   }
+  const authWalletAddress = resolveAuthWalletAddress(walletAddress);
+  const requestInput: MarketRequestInput = {
+    ...input,
+    submitterAddress: authWalletAddress
+  };
   const authHeaders = await buildWalletAuthHeaders({
     account,
-    walletAddress,
+    walletAddress: authWalletAddress,
     method: "POST",
     path: "/api/requests"
   });
@@ -490,7 +507,7 @@ export async function createRequestForWallet(
       },
       worldIdToken
     ),
-    body: JSON.stringify(input)
+    body: JSON.stringify(requestInput)
   });
 }
 
@@ -533,10 +550,11 @@ export async function runVerificationForWallet(
   if (!account) {
     throw new Error("wallet_account_required");
   }
+  const authWalletAddress = resolveAuthWalletAddress(walletAddress);
   const path = `/api/requests/${encodeURIComponent(requestId)}/run-verification`;
   const authHeaders = await buildWalletAuthHeaders({
     account,
-    walletAddress,
+    walletAddress: authWalletAddress,
     method: "POST",
     path
   });
@@ -591,12 +609,18 @@ export async function registerNode(input: {
   worldIdToken?: string;
   account?: Account;
 }): Promise<{ node: RegisteredNode; paymentReceipt: VerificationPaymentReceipt }> {
-  if (!input.account) {
+  const account = input.account;
+  if (!account) {
     throw new Error("wallet_account_required");
   }
+  const authWalletAddress = resolveAuthWalletAddress(input.walletAddress);
+  const requestInput = {
+    ...input,
+    walletAddress: authWalletAddress
+  };
   const authHeaders = await buildWalletAuthHeaders({
-    account: input.account,
-    walletAddress: input.walletAddress,
+    account,
+    walletAddress: requestInput.walletAddress,
     method: "POST",
     path: "/api/nodes/register"
   });
@@ -607,9 +631,9 @@ export async function registerNode(input: {
         ...authHeaders,
         "payment-signature": authHeaders[WALLET_AUTH_SIGNATURE_HEADER] ?? ""
       },
-      input.worldIdToken
+      requestInput.worldIdToken
     ),
-    body: JSON.stringify(input)
+    body: JSON.stringify(requestInput)
   });
 }
 
@@ -625,12 +649,18 @@ export async function requestNodeChallenge(input: {
   worldIdToken?: string;
   account?: Account;
 }): Promise<{ challenge: NodeRegistrationChallenge; paymentReceipt: VerificationPaymentReceipt }> {
-  if (!input.account) {
+  const account = input.account;
+  if (!account) {
     throw new Error("wallet_account_required");
   }
+  const authWalletAddress = resolveAuthWalletAddress(input.walletAddress);
+  const requestInput = {
+    ...input,
+    walletAddress: authWalletAddress
+  };
   const authHeaders = await buildWalletAuthHeaders({
-    account: input.account,
-    walletAddress: input.walletAddress,
+    account,
+    walletAddress: requestInput.walletAddress,
     method: "POST",
     path: "/api/nodes/challenge"
   });
@@ -643,9 +673,9 @@ export async function requestNodeChallenge(input: {
           ...authHeaders,
           "payment-signature": authHeaders[WALLET_AUTH_SIGNATURE_HEADER] ?? ""
         },
-        input.worldIdToken
+        requestInput.worldIdToken
       ),
-      body: JSON.stringify(input)
+      body: JSON.stringify(requestInput)
     }
   );
 }
@@ -661,9 +691,10 @@ export async function verifyWorldIdForWallet(input: {
   if (!input.account) {
     throw new Error("wallet_account_required");
   }
+  const authWalletAddress = resolveAuthWalletAddress(input.walletAddress);
   const authHeaders = await buildWalletAuthHeaders({
     account: input.account,
-    walletAddress: input.walletAddress,
+    walletAddress: authWalletAddress,
     method: "POST",
     path: "/api/world-id/verify"
   });
@@ -671,7 +702,7 @@ export async function verifyWorldIdForWallet(input: {
     method: "POST",
     headers: authHeaders,
     body: JSON.stringify({
-      walletAddress: input.walletAddress,
+      walletAddress: authWalletAddress,
       proof: input.proof,
       appId: input.appId,
       action: input.action,
@@ -691,12 +722,18 @@ export async function activateNodeChallenge(input: {
   endpointProbe: NodeEndpointProbe;
   lifecycleOnchainReceipt?: RequestRecord["onchainReceipt"];
 }> {
-  if (!input.account) {
+  const account = input.account;
+  if (!account) {
     throw new Error("wallet_account_required");
   }
+  const authWalletAddress = resolveAuthWalletAddress(input.walletAddress);
+  const requestInput = {
+    ...input,
+    walletAddress: authWalletAddress
+  };
   const authHeaders = await buildWalletAuthHeaders({
-    account: input.account,
-    walletAddress: input.walletAddress,
+    account,
+    walletAddress: requestInput.walletAddress,
     method: "POST",
     path: "/api/nodes/activate"
   });
@@ -708,7 +745,7 @@ export async function activateNodeChallenge(input: {
   }>("/api/nodes/activate", {
     method: "POST",
     headers: authHeaders,
-    body: JSON.stringify(input)
+    body: JSON.stringify(requestInput)
   });
 }
 
@@ -724,12 +761,18 @@ export async function sendNodeHeartbeat(input: {
   heartbeatMessage: string;
   lifecycleOnchainReceipt?: RequestRecord["onchainReceipt"];
 }> {
-  if (!input.account) {
+  const account = input.account;
+  if (!account) {
     throw new Error("wallet_account_required");
   }
+  const authWalletAddress = resolveAuthWalletAddress(input.walletAddress);
+  const requestInput = {
+    ...input,
+    walletAddress: authWalletAddress
+  };
   const authHeaders = await buildWalletAuthHeaders({
-    account: input.account,
-    walletAddress: input.walletAddress,
+    account,
+    walletAddress: requestInput.walletAddress,
     method: "POST",
     path: "/api/nodes/heartbeat"
   });
@@ -743,7 +786,7 @@ export async function sendNodeHeartbeat(input: {
     {
       method: "POST",
       headers: authHeaders,
-      body: JSON.stringify(input)
+      body: JSON.stringify(requestInput)
     }
   );
 }
