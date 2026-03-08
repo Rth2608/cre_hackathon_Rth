@@ -22,7 +22,7 @@ export interface RequestRecord {
     | "FAILED_ONCHAIN_SUBMISSION";
   vectorSync?: {
     state: "PENDING" | "APPLYING" | "APPLIED" | "FAILED";
-    vectorStatus: "QUEUED" | "VERIFYING" | "APPROVED_PENDING_OPEN" | "OPEN" | "REJECTED";
+    vectorStatus: "QUEUED" | "VERIFYING" | "APPROVED_PENDING_OPEN" | "OPEN" | "CLOSED" | "REJECTED";
     attempts: number;
     updatedAt: string;
     lastError?: string;

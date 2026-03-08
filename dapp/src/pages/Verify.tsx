@@ -44,6 +44,14 @@ function formatShortAddress(value: string): string {
   return `${trimmed.slice(0, 6)}...${trimmed.slice(-4)}`;
 }
 
+function shortenText(value: string, max = 96): string {
+  const trimmed = value.trim();
+  if (trimmed.length <= max) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, max - 1)}...`;
+}
+
 function looksLikeWorldIdV4ProofPayload(value: Record<string, unknown>): boolean {
   if (typeof value.protocol_version === "string") {
     return true;
@@ -493,6 +501,7 @@ export default function VerifyPage() {
     worldIdSession && Number.isFinite(Date.parse(worldIdSession.expiresAt))
       ? Date.parse(worldIdSession.expiresAt) > Date.now()
       : Boolean(worldIdSession?.token);
+  const normalizedWalletAddress = walletAddress.trim().toLowerCase();
 
   const sortedRequests = useMemo(() => {
     return [...requests].sort((a, b) => {
@@ -529,6 +538,62 @@ export default function VerifyPage() {
     }
     return summary;
   }, [requests]);
+
+  const myRequests = useMemo(() => {
+    if (!walletConnected || !normalizedWalletAddress) {
+      return [];
+    }
+    return sortedRequests.filter(
+      (item) => item.input.submitterAddress.trim().toLowerCase() === normalizedWalletAddress
+    );
+  }, [sortedRequests, walletConnected, normalizedWalletAddress]);
+
+  const myRequestSummary = useMemo(() => {
+    const summary = {
+      total: myRequests.length,
+      vectorPending: 0,
+      queuedForVerify: 0,
+      verifyPassed: 0,
+      closed: 0,
+      rejected: 0
+    };
+
+    for (const item of myRequests) {
+      const vectorStatus = item.vectorSync?.vectorStatus;
+      const vectorState = item.vectorSync?.state;
+      const queueDecision = item.queueDecision?.decision;
+
+      if (item.status === "FINALIZED") {
+        summary.verifyPassed += 1;
+      }
+      if (item.status === "REJECTED_DUPLICATE" || item.status === "REJECTED_CONFLICT" || vectorStatus === "REJECTED") {
+        summary.rejected += 1;
+      }
+      if (vectorStatus === "CLOSED") {
+        summary.closed += 1;
+      }
+
+      const isVectorPending =
+        vectorState === "PENDING" ||
+        vectorState === "APPLYING" ||
+        vectorState === "FAILED" ||
+        vectorStatus === "VERIFYING";
+      if (isVectorPending) {
+        summary.vectorPending += 1;
+      }
+
+      const isQueuedForVerify =
+        item.status === "PENDING" &&
+        queueDecision === "allow" &&
+        vectorState === "APPLIED" &&
+        vectorStatus === "QUEUED";
+      if (isQueuedForVerify) {
+        summary.queuedForVerify += 1;
+      }
+    }
+
+    return summary;
+  }, [myRequests]);
 
   const returnToPath = useMemo(() => {
     const params = new URLSearchParams(location.search);
@@ -794,6 +859,97 @@ export default function VerifyPage() {
               <p className="wallet-info mono">{queueSummary.failed}</p>
             </div>
           </div>
+        </section>
+
+        <section className="status-card">
+          <h2>My Question Dashboard</h2>
+          {!walletConnected ? (
+            <p>Connect wallet to view your submitted questions.</p>
+          ) : myRequests.length === 0 ? (
+            <p>No requests submitted by this wallet yet.</p>
+          ) : (
+            <>
+              <div className="snapshot-grid">
+                <div className="snapshot-item">
+                  <p className="snapshot-label">My Total</p>
+                  <p className="wallet-info mono">{myRequestSummary.total}</p>
+                </div>
+                <div className="snapshot-item">
+                  <p className="snapshot-label">Vector Pending</p>
+                  <p className="wallet-info mono">{myRequestSummary.vectorPending}</p>
+                </div>
+                <div className="snapshot-item">
+                  <p className="snapshot-label">Queued For Verify</p>
+                  <p className="wallet-info mono">{myRequestSummary.queuedForVerify}</p>
+                </div>
+                <div className="snapshot-item">
+                  <p className="snapshot-label">Verify Passed</p>
+                  <p className="wallet-info mono">{myRequestSummary.verifyPassed}</p>
+                </div>
+                <div className="snapshot-item">
+                  <p className="snapshot-label">Closed</p>
+                  <p className="wallet-info mono">{myRequestSummary.closed}</p>
+                </div>
+                <div className="snapshot-item">
+                  <p className="snapshot-label">Rejected</p>
+                  <p className="wallet-info mono">{myRequestSummary.rejected}</p>
+                </div>
+              </div>
+
+              <div className="request-table">
+                <div className="request-head">
+                  <span>Question</span>
+                  <span>Status</span>
+                  <span>Queue</span>
+                  <span>Vector</span>
+                  <span>Updated</span>
+                  <span>Action</span>
+                </div>
+                {myRequests.map((record) => {
+                  const canRunPending =
+                    record.status === "PENDING" &&
+                    Boolean(worldIdSession?.token) &&
+                    worldIdSessionActive &&
+                    runningRequestId === null;
+                  const pendingReason =
+                    !worldIdSession?.token || !worldIdSessionActive
+                      ? "verify world id"
+                      : runningRequestId !== null
+                        ? "another run in progress"
+                        : "ready";
+                  return (
+                    <div key={record.requestId} className="request-row">
+                      <span className="question-cell">{shortenText(record.input.question)}</span>
+                      <span className={`status-badge ${getStatusTone(record.status)}`}>{record.status}</span>
+                      <span className="small mono">{record.queueDecision?.decision ?? "-"}</span>
+                      <span className="small mono">
+                        {record.vectorSync ? `${record.vectorSync.state}/${record.vectorSync.vectorStatus}` : "-"}
+                      </span>
+                      <span>{new Date(record.updatedAt).toLocaleString()}</span>
+                      <span className="inline-row">
+                        <Link className="text-link" to={`/result/${encodeURIComponent(record.requestId)}`}>
+                          Result
+                        </Link>
+                        {record.status === "PENDING" && (
+                          <button
+                            type="button"
+                            className="secondary"
+                            onClick={() => void onRunQueuedRequest(record)}
+                            disabled={!canRunPending || runningRequestId === record.requestId}
+                          >
+                            {runningRequestId === record.requestId ? "Running..." : "Run Verify"}
+                          </button>
+                        )}
+                        {record.status === "PENDING" && !canRunPending && (
+                          <span className="small mono">({pendingReason})</span>
+                        )}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
         </section>
 
         <section className="status-card">

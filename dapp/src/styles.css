@@ -457,7 +457,7 @@ button:disabled {
 .request-head,
 .request-row {
   display: grid;
-  grid-template-columns: 2.25fr 1.05fr 0.55fr 1.15fr 1.35fr;
+  grid-template-columns: 2.2fr 1.05fr 0.9fr 1.1fr 1.35fr 1.45fr;
   gap: 0.55rem;
   align-items: center;
 }
@@ -481,6 +481,11 @@ button:disabled {
   min-width: 0;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.question-cell {
+  font-weight: 600;
+  color: #d7e7f8;
 }
 
 .text-link {
