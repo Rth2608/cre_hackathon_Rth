@@ -25,6 +25,7 @@ interface EndpointDispatchParams {
   timeoutMs: number;
   verifyPath: string;
   requireSignedReports?: boolean;
+  expectedPromptTemplateHash?: string;
 }
 
 function stringifyError(error: unknown): string {
@@ -75,6 +76,68 @@ function buildEndpointUrl(endpointUrl: string, endpointPath: string): string {
 
   const base = endpointUrl.endsWith("/") ? endpointUrl : `${endpointUrl}/`;
   return new URL(normalizedPath.replace(/^\//, ""), base).toString();
+}
+
+function normalizeHex32(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function readStringField(obj: Record<string, unknown>, key: string): string | undefined {
+  const value = obj[key];
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function resolveHealthPromptTemplateHash(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return undefined;
+  }
+  const root = payload as Record<string, unknown>;
+  const data =
+    root.data && typeof root.data === "object" && !Array.isArray(root.data) ? (root.data as Record<string, unknown>) : root;
+  const runtimeNode =
+    data.runtimeNode && typeof data.runtimeNode === "object" && !Array.isArray(data.runtimeNode)
+      ? (data.runtimeNode as Record<string, unknown>)
+      : undefined;
+
+  return readStringField(data, "promptTemplateHash") ?? (runtimeNode ? readStringField(runtimeNode, "promptTemplateHash") : undefined);
+}
+
+async function verifyEndpointPromptTemplateCompatibility(args: {
+  endpointUrl: string;
+  timeoutMs: number;
+  expectedPromptTemplateHash: string;
+}): Promise<void> {
+  const healthzUrl = buildEndpointUrl(args.endpointUrl, "/healthz");
+  const response = await fetch(healthzUrl, {
+    method: "GET",
+    signal: AbortSignal.timeout(args.timeoutMs)
+  });
+
+  if (!response.ok) {
+    throw new Error(`endpoint_health_http_${response.status}`);
+  }
+
+  let payload: unknown;
+  try {
+    payload = (await response.json()) as unknown;
+  } catch {
+    throw new Error("endpoint_health_invalid_json");
+  }
+
+  const actual = resolveHealthPromptTemplateHash(payload);
+  if (!actual) {
+    throw new Error("endpoint_prompt_template_hash_missing");
+  }
+
+  const expectedNormalized = normalizeHex32(args.expectedPromptTemplateHash);
+  const actualNormalized = normalizeHex32(actual);
+  if (actualNormalized !== expectedNormalized) {
+    throw new Error(`endpoint_prompt_template_hash_mismatch:expected=${expectedNormalized},actual=${actualNormalized}`);
+  }
 }
 
 function parseReportFromEndpoint(args: {
@@ -217,7 +280,16 @@ async function runEndpointNode(params: {
   timeoutMs: number;
   verifyPath: string;
   requireSignedReports: boolean;
+  expectedPromptTemplateHash?: string;
 }): Promise<{ report: NodeReport; signedReport?: SignedNodeReport; executionReceipt?: ExecutionReceipt }> {
+  if (params.expectedPromptTemplateHash) {
+    await verifyEndpointPromptTemplateCompatibility({
+      endpointUrl: params.endpointUrl,
+      timeoutMs: params.timeoutMs,
+      expectedPromptTemplateHash: params.expectedPromptTemplateHash
+    });
+  }
+
   const verifyUrl = buildEndpointUrl(params.endpointUrl, params.verifyPath);
   const response = await fetch(verifyUrl, {
     method: "POST",
@@ -296,7 +368,8 @@ export async function runAllRuntimeNodesViaEndpoints(params: EndpointDispatchPar
         endpointUrl,
         timeoutMs: params.timeoutMs,
         verifyPath: params.verifyPath,
-        requireSignedReports
+        requireSignedReports,
+        expectedPromptTemplateHash: params.expectedPromptTemplateHash
       });
     })
   );

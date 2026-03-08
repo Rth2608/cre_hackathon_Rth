@@ -70,6 +70,18 @@ describe("runCreWorkflow DON mode", () => {
 
       const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
 
+      if (url.pathname.endsWith("/healthz")) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            runtimeNode: {
+              promptTemplateHash: id("cre-prediction-market-prompt-template-v1")
+            }
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+
       if (url.pathname.endsWith("/verify")) {
         const node = (body.node as Record<string, unknown>) ?? {};
         const operator = String(node.operatorAddress ?? "");

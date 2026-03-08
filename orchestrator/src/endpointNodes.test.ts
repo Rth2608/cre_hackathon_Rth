@@ -34,6 +34,136 @@ function activeNode(input: { wallet: string; endpointUrl: string; modelFamily: R
 }
 
 describe("endpoint node dispatch", () => {
+  test("filters node when healthz prompt template hash mismatches expected hash", async () => {
+    const runtimeNode: RuntimeNode = {
+      nodeId: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      modelFamily: "gpt",
+      modelName: "remote-gpt",
+      operatorAddress: "0xaAaAaAaaAaAaAaaAaAAAAAAAAaaaAaAaAaaAaaAa"
+    };
+
+    const originalFetch = globalThis.fetch;
+    const calls: string[] = [];
+    globalThis.fetch = (async (input, _init) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.endsWith("/healthz")) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            runtimeNode: {
+              promptTemplateHash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          }
+        );
+      }
+
+      return new Response(JSON.stringify({ ok: false, error: "should_not_call_verify" }), { status: 500 });
+    }) as typeof fetch;
+
+    try {
+      const result = await runAllRuntimeNodesViaEndpoints({
+        requestId: "0x89fc08aae4939f45486abcb2bb6917d08b42e4f7faa5902f78a9f0417eccf008",
+        input: sampleInput(),
+        runtimeNodes: [runtimeNode],
+        activeNodes: [
+          activeNode({
+            wallet: runtimeNode.operatorAddress,
+            endpointUrl: "https://operator-1.example.com",
+            modelFamily: runtimeNode.modelFamily
+          })
+        ],
+        timeoutMs: 2000,
+        verifyPath: "/verify",
+        expectedPromptTemplateHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      });
+
+      expect(result.reports.length).toBe(0);
+      expect(result.failures.length).toBe(1);
+      expect(result.failures[0]?.reason.startsWith("endpoint_prompt_template_hash_mismatch")).toBe(true);
+      expect(calls).toEqual(["https://operator-1.example.com/healthz"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("dispatches report when healthz prompt template hash matches expected hash", async () => {
+    const runtimeNode: RuntimeNode = {
+      nodeId: "0xcccccccccccccccccccccccccccccccccccccccc",
+      modelFamily: "claude",
+      modelName: "remote-claude",
+      operatorAddress: "0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC"
+    };
+
+    const originalFetch = globalThis.fetch;
+    const calls: string[] = [];
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.endsWith("/healthz")) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            runtimeNode: {
+              promptTemplateHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          }
+        );
+      }
+      expect(url).toBe("https://operator-3.example.com/verify");
+      expect(init?.method).toBe("POST");
+
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          data: {
+            verdict: "PASS",
+            confidence: 0.83,
+            rationale: "remote rationale",
+            evidenceSummary: "remote evidence",
+            generatedAt: "2026-01-01T00:00:00.000Z"
+          }
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        }
+      );
+    }) as typeof fetch;
+
+    try {
+      const result = await runAllRuntimeNodesViaEndpoints({
+        requestId: "0x89fc08aae4939f45486abcb2bb6917d08b42e4f7faa5902f78a9f0417eccf008",
+        input: sampleInput(),
+        runtimeNodes: [runtimeNode],
+        activeNodes: [
+          activeNode({
+            wallet: runtimeNode.operatorAddress,
+            endpointUrl: "https://operator-3.example.com",
+            modelFamily: runtimeNode.modelFamily
+          })
+        ],
+        timeoutMs: 2000,
+        verifyPath: "/verify",
+        expectedPromptTemplateHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      });
+
+      expect(result.failures.length).toBe(0);
+      expect(result.reports.length).toBe(1);
+      expect(calls).toEqual(["https://operator-3.example.com/healthz", "https://operator-3.example.com/verify"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("dispatches report from endpoint /verify", async () => {
     const runtimeNode: RuntimeNode = {
       nodeId: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

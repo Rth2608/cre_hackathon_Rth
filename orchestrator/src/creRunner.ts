@@ -203,6 +203,11 @@ function resolveEndpointRequireSignedReports(useDonSignedReports: boolean, useEn
   return parseBooleanEnv(process.env.NODE_ENDPOINT_REQUIRE_SIGNED_REPORTS, fallback);
 }
 
+function resolveEndpointRequirePromptTemplateMatch(useDonSignedReports: boolean, useEndpointDispatch: boolean): boolean {
+  const fallback = useDonSignedReports && useEndpointDispatch;
+  return parseBooleanEnv(process.env.NODE_ENDPOINT_REQUIRE_PROMPT_TEMPLATE_MATCH, fallback);
+}
+
 function resolveEndpointBundleSigning(useDonSignedReports: boolean, useEndpointDispatch: boolean): boolean {
   const fallback = useDonSignedReports && useEndpointDispatch;
   return parseBooleanEnv(process.env.DON_ENDPOINT_BUNDLE_SIGNING_ENABLED, fallback);
@@ -282,12 +287,13 @@ export async function runCreWorkflow(params: WorkflowParams): Promise<WorkflowRu
     throw new Error("NODE_ENDPOINT_VERIFY_ENABLED=true is required. Local runtime dispatch has been removed.");
   }
   const endpointRequireSignedReports = resolveEndpointRequireSignedReports(useDonSignedReports, useEndpointDispatch);
+  const endpointRequirePromptTemplateMatch = resolveEndpointRequirePromptTemplateMatch(useDonSignedReports, useEndpointDispatch);
   const endpointBundleSigningEnabled = resolveEndpointBundleSigning(useDonSignedReports, useEndpointDispatch);
   const endpointBundleApprovalPath = resolveEndpointBundleApprovalPath();
   const endpointLeaderSignPath = resolveEndpointLeaderSignPath();
   let donRound = 1;
   let requestHash = "";
-  let promptTemplateHash = "";
+  let promptTemplateHash = resolvePromptTemplateHashFromEnv();
   let attestationRootHash = "";
 
   await runStep("validate_input", stepLogs, async () => {
@@ -316,7 +322,8 @@ export async function runCreWorkflow(params: WorkflowParams): Promise<WorkflowRu
       activeNodes: params.activeNodes,
       timeoutMs: endpointDispatchTimeoutMs,
       verifyPath: endpointDispatchPath,
-      requireSignedReports: endpointRequireSignedReports
+      requireSignedReports: endpointRequireSignedReports,
+      expectedPromptTemplateHash: endpointRequirePromptTemplateMatch ? promptTemplateHash : undefined
     });
     nodeReports = dispatchResult.reports;
     nodeFailures = dispatchResult.failures;
@@ -326,7 +333,6 @@ export async function runCreWorkflow(params: WorkflowParams): Promise<WorkflowRu
       executionReceipts = dispatchResult.executionReceipts ?? [];
       donRound = resolveDonRoundFromEnv();
       requestHash = buildRequestHash(validatedInput);
-      promptTemplateHash = resolvePromptTemplateHashFromEnv();
       attestationRootHash =
         executionReceipts.length > 0 ? computeReportsMerkleRoot(executionReceipts.map((receipt) => receipt.confidentialAttestationHash)) : ZeroHash;
       if (endpointRequireSignedReports) {

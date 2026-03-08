@@ -464,7 +464,11 @@ async function router(req: Request): Promise<Response> {
       ok: true,
       service: "cre-node-worker",
       timestamp: nowIso(),
-      runtimeNode,
+      runtimeNode: {
+        ...runtimeNode,
+        promptTemplateHash,
+        paramsHash: id("temperature=0|max_tokens=256")
+      },
       signer: signerWallet.address,
       domain: donDomain,
       routes: ["/verify", "/sign-bundle-approval", "/sign-consensus-bundle"]

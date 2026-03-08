@@ -271,6 +271,8 @@ Each verifier worker node exposes:
 - `POST /sign-bundle-approval`
 - `POST /sign-consensus-bundle`
 
+`GET /healthz` should expose worker prompt metadata (at minimum `runtimeNode.promptTemplateHash`) so orchestrator can pre-filter nodes when template versions change.
+
 Worker launcher script:
 
 - `scripts/start_don_workers.sh`
@@ -282,6 +284,7 @@ For distributed DON-like operation, use:
 - `USE_DON_SIGNED_REPORTS=true`
 - `NODE_ENDPOINT_VERIFY_ENABLED=true`
 - `NODE_ENDPOINT_REQUIRE_SIGNED_REPORTS=true`
+- `NODE_ENDPOINT_REQUIRE_PROMPT_TEMPLATE_MATCH=true`
 - `DON_ENDPOINT_BUNDLE_SIGNING_ENABLED=true`
 - `NODE_ENDPOINT_VERIFY_FALLBACK_MOCK=false`
 - `ALLOW_DEFAULT_NODES=false`
@@ -309,6 +312,24 @@ Expected verifier response shape (any one of these):
 
 - `{ "ok": true, "data": { "report": { "verdict": "PASS|FAIL", "confidence": 0..1, "rationale": "...", "evidenceSummary": "...", "generatedAt": "...", "reportHash": "0x..." } } }`
 - `{ "verdict": "PASS|FAIL", "confidence": 0..1, ... }`
+
+### Built-in LLM verifier service (same template across all nodes)
+
+Use one shared verifier codebase and deploy it as 4 services (`verifier-gpt`, `verifier-gemini`, `verifier-claude`, `verifier-grok`) with different env values only.
+
+- Start:
+  - `cd orchestrator && bun run llm-verifier-service`
+- Env template:
+  - `orchestrator/.env.example.verifier`
+- Key points:
+  - all verifier services can keep the same `VERIFIER_PROMPT_TEMPLATE_ID`, `VERIFIER_PROMPT_TEMPLATE_VERSION`, and template body
+  - change only provider/model/key per service
+  - set `VERIFIER_AUTH_TOKEN` and use the same value in worker `RUNTIME_NODE_CRE_VERIFY_AUTH_TOKEN`
+
+Worker mapping example:
+
+- `RUNTIME_NODE_CRE_VERIFY_URL=https://verifier-gpt-.../verify`
+- `RUNTIME_NODE_CRE_VERIFY_AUTH_TOKEN=<same token as verifier-gpt VERIFIER_AUTH_TOKEN>`
 
 ### CRE verifier adapter service
 
@@ -400,6 +421,7 @@ The orchestrator reads chain settings from `orchestrator/.env`:
 - `DON_DISTRIBUTED_MODE` (default auto, when true: endpoint/registered-node requirements become strict by default)
 - `NODE_ENDPOINT_VERIFY_ENABLED` (default `false`, call registered worker endpoints)
 - `NODE_ENDPOINT_REQUIRE_SIGNED_REPORTS` (default `true`, require signed report + execution receipt)
+- `NODE_ENDPOINT_REQUIRE_PROMPT_TEMPLATE_MATCH` (default `true` when DON signed reports are enabled; pre-check `/healthz` and exclude workers with mismatched/missing template hash)
 - `NODE_ENDPOINT_VERIFY_PATH` (default `/verify`)
 - `NODE_ENDPOINT_VERIFY_TIMEOUT_MS` (default `8000`)
 - `NODE_ENDPOINT_VERIFY_FALLBACK_MOCK` (default `false`)

@@ -11,6 +11,9 @@ out/
 .env
 .env.*
 !.env.example
+!.env.example.node
+!.env.example.verifier
+!.env.example.verifier.*
 
 # foundry
 cache/
