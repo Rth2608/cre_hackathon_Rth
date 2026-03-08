@@ -35,41 +35,86 @@ const defaultForm: MarketRequestInput = {
 };
 
 interface SimilarRequestTemplate {
-  id: "A" | "B";
+  id: string;
   label: string;
   input: Omit<MarketRequestInput, "submitterAddress">;
 }
 
 const similarityTemplates: SimilarRequestTemplate[] = [
   {
-    id: "A",
-    label: "BTC 130K (Template A)",
+    id: "T1",
+    label: "ETH 6K by 2027",
     input: {
-      question: "Will Bitcoin close above $130,000 before December 31, 2026?",
+      question: "Will ETH close above $6,000 at least once before January 1, 2027 UTC?",
       description:
-        "Evaluate whether BTC/USD reaches at least one daily close above 130000 USD before 2026-12-31 23:59:59 UTC.",
+        "Track whether ETH/USD records any daily close strictly above 6000 USD before 2027-01-01 00:00:00 UTC.",
       resolutionCriteria:
-        "Resolve YES if a widely used BTC/USD spot index prints any daily close strictly above 130000 USD before the deadline. Otherwise resolve NO.",
+        "Resolve YES if Reuters or Bloomberg market coverage confirms an ETH/USD daily close greater than 6000 USD before the deadline. Otherwise resolve NO.",
       sourceUrls: [
-        "https://www.coindesk.com/",
-        "https://cointelegraph.com/",
-        "https://www.coingecko.com/"
+        "https://www.reuters.com/",
+        "https://www.bloomberg.com/"
       ]
     }
   },
   {
-    id: "B",
-    label: "BTC 130K (Template B)",
+    id: "T2",
+    label: "SOL Outage Q3 2026",
     input: {
-      question: "Can BTC post a daily close higher than $130k by the end of 2026?",
+      question: "Will Solana mainnet experience any outage longer than 120 minutes during Q3 2026?",
       description:
-        "Check if Bitcoin records at least one day-end close above 130000 USD on major spot market reference feeds before the final day of 2026.",
+        "Monitor incidents between 2026-07-01 and 2026-09-30 UTC and check whether cumulative unavailability in a single event exceeds 120 minutes.",
       resolutionCriteria:
-        "Resolve YES when any accepted BTC/USD daily close is greater than 130000 USD prior to 2026-12-31 23:59:59 UTC. If never exceeded, resolve NO.",
+        "Resolve YES if Reuters or The Block publishes incident reporting showing a Solana outage duration over 120 minutes in the period. Otherwise resolve NO.",
       sourceUrls: [
-        "https://www.coindesk.com/",
-        "https://cointelegraph.com/",
-        "https://www.coingecko.com/"
+        "https://www.reuters.com/",
+        "https://www.theblock.co/"
+      ]
+    }
+  },
+  {
+    id: "T3",
+    label: "Fed Cut by Sep 2026",
+    input: {
+      question: "Will the U.S. Federal Reserve cut the target rate by at least 25 bps by September 30, 2026?",
+      description:
+        "Track FOMC decisions through 2026-09-30 UTC and evaluate whether cumulative easing from the starting target range reaches at least 25 basis points.",
+      resolutionCriteria:
+        "Resolve YES if Federal Reserve statements or Reuters/WSJ reporting confirm at least one 25 bps total cut by the deadline. Otherwise resolve NO.",
+      sourceUrls: [
+        "https://www.federalreserve.gov/",
+        "https://www.reuters.com/",
+        "https://www.wsj.com/"
+      ]
+    }
+  },
+  {
+    id: "T4",
+    label: "XRP ETF Approval",
+    input: {
+      question: "Will the SEC approve a U.S. spot XRP ETF before December 31, 2026 UTC?",
+      description:
+        "Track official SEC filings and major financial press reports for a spot XRP ETF approval decision before the 2026 year-end cutoff.",
+      resolutionCriteria:
+        "Resolve YES only if an SEC order or filing confirms approval of a U.S. spot XRP ETF by the deadline. Otherwise resolve NO.",
+      sourceUrls: [
+        "https://www.sec.gov/",
+        "https://www.reuters.com/",
+        "https://www.bloomberg.com/"
+      ]
+    }
+  },
+  {
+    id: "T5",
+    label: "BTC Dominance < 45%",
+    input: {
+      question: "Will Bitcoin market dominance fall below 45% on any day before October 1, 2026 UTC?",
+      description:
+        "Track daily BTC dominance percentage and check if at least one published daily reading is strictly below 45.0% before the deadline.",
+      resolutionCriteria:
+        "Resolve YES if CoinGecko or Reuters market data coverage shows BTC dominance under 45% before 2026-10-01 00:00:00 UTC. Otherwise resolve NO.",
+      sourceUrls: [
+        "https://www.coingecko.com/",
+        "https://www.reuters.com/"
       ]
     }
   }
@@ -700,7 +745,7 @@ export default function SubmitPage() {
 
         <section className="status-card">
           <h2>Quick Similarity Templates</h2>
-          <p>Choose Template A, submit once, then choose Template B and submit again to test similarity screening.</p>
+          <p>Choose one template to auto-fill. These five templates are intentionally diverse to reduce duplicate similarity hits.</p>
           <div className="action-row">
             {similarityTemplates.map((template) => (
               <button
@@ -710,7 +755,7 @@ export default function SubmitPage() {
                 onClick={() => applySimilarityTemplate(template)}
                 disabled={submitting}
               >
-                Fill {template.label}
+                Fill {template.id}: {template.label}
               </button>
             ))}
           </div>
