@@ -2289,6 +2289,7 @@ async function executeVerificationForRecord(
 
     await saveRequest(failedRecord);
     await syncRequestVectorStatus(failedRecord, "verification_failed_insufficient_registered_nodes");
+    scheduleRequestQueueProcessor("verification_failed_insufficient_registered_nodes");
     logServerFailure("request.run.failed", {
       traceId,
       requestId,
@@ -2322,6 +2323,7 @@ async function executeVerificationForRecord(
     };
     await saveRequest(failedRecord);
     await syncRequestVectorStatus(failedRecord, "verification_failed_insufficient_runtime_nodes");
+    scheduleRequestQueueProcessor("verification_failed_insufficient_runtime_nodes");
     logServerFailure("request.run.failed", {
       traceId,
       requestId,
@@ -2420,6 +2422,7 @@ async function executeVerificationForRecord(
 
     await saveRequest(finalized);
     const finalizedWithVectorSync = await syncRequestVectorStatus(finalized, "verification_completed");
+    scheduleRequestQueueProcessor("verification_completed");
     if (finalStatus !== "FINALIZED") {
       logServerFailure("request.run.failed", {
         traceId,
@@ -2464,6 +2467,7 @@ async function executeVerificationForRecord(
     };
     await saveRequest(failed);
     const failedWithVectorSync = await syncRequestVectorStatus(failed, "verification_exception");
+    scheduleRequestQueueProcessor("verification_exception");
 
     return jsonResponse(
       {
