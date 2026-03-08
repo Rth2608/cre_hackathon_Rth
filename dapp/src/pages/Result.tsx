@@ -2,7 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ConnectButton, useActiveAccount } from "thirdweb/react";
 import AppNav from "../components/AppNav";
-import { ApiRequestError, getRequest, runVerificationForWallet, type RequestRecord, type WorldIdSession } from "../lib/api";
+import {
+  ApiRequestError,
+  getRequest,
+  resolveWalletAddressForAuth,
+  runVerificationForWallet,
+  type RequestRecord,
+  type WorldIdSession
+} from "../lib/api";
 import { isThirdwebClientConfigured, thirdwebClient } from "../lib/thirdweb";
 import { clearWorldIdSession, loadWorldIdSession } from "../lib/worldId";
 import { worldChainSepoliaChain } from "../lib/worldChain";
@@ -22,7 +29,8 @@ function formatRequestId(value: string | undefined): string {
 export default function ResultPage() {
   const { requestId } = useParams();
   const activeAccount = useActiveAccount();
-  const walletAddress = activeAccount?.address ?? "";
+  const activeWalletAddress = activeAccount?.address ?? "";
+  const walletAddress = resolveWalletAddressForAuth(activeWalletAddress, activeAccount);
   const walletConnected = walletAddress.length > 0;
   const thirdwebConfigured = isThirdwebClientConfigured();
   const requireWorldIdOnRun = String(import.meta.env.VITE_REQUEST_REQUIRE_WORLD_ID_ON_RUN ?? "true").trim().toLowerCase() !== "false";

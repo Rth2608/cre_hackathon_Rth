@@ -251,6 +251,10 @@ function resolveAuthWalletAddress(walletAddress: string, account?: Account): str
   return extractEvmAddress(walletAddress) ?? toLowerAddress(walletAddress);
 }
 
+export function resolveWalletAddressForAuth(walletAddress: string, account?: Account): string {
+  return resolveAuthWalletAddress(walletAddress, account);
+}
+
 function buildWalletAuthMessage(input: {
   walletAddress: string;
   method: string;

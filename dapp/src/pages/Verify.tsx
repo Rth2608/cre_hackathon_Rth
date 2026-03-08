@@ -15,6 +15,7 @@ import { ConnectButton, useActiveAccount } from "thirdweb/react";
 import AppNav from "../components/AppNav";
 import {
   listRequests,
+  resolveWalletAddressForAuth,
   runVerificationForWallet,
   verifyWorldIdForWallet,
   type RequestRecord,
@@ -423,7 +424,8 @@ function getStatusTone(status: RequestRecord["status"]): "ok" | "warn" | "bad" {
 export default function VerifyPage() {
   const location = useLocation();
   const activeAccount = useActiveAccount();
-  const walletAddress = activeAccount?.address ?? "";
+  const activeWalletAddress = activeAccount?.address ?? "";
+  const walletAddress = resolveWalletAddressForAuth(activeWalletAddress, activeAccount);
   const walletConnected = walletAddress.length > 0;
   const worldIdSignal = normalizeWorldIdSignal(walletAddress);
   const thirdwebConfigured = isThirdwebClientConfigured();

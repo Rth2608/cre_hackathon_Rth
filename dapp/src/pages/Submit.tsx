@@ -13,6 +13,7 @@ import { ConnectButton, useActiveAccount, useWalletBalance } from "thirdweb/reac
 import AppNav from "../components/AppNav";
 import {
   createRequestForWallet,
+  resolveWalletAddressForAuth,
   verifyWorldIdForWallet,
   type MarketRequestInput,
   type WorldIdSession
@@ -489,7 +490,8 @@ async function ensureMiniKitInstalled(appId: string): Promise<void> {
 export default function SubmitPage() {
   const navigate = useNavigate();
   const activeAccount = useActiveAccount();
-  const walletAddress = activeAccount?.address ?? "";
+  const activeWalletAddress = activeAccount?.address ?? "";
+  const walletAddress = resolveWalletAddressForAuth(activeWalletAddress, activeAccount);
   const worldIdSignal = normalizeWorldIdSignal(walletAddress);
   const walletConnected = walletAddress.length > 0;
   const thirdwebConfigured = isThirdwebClientConfigured();
