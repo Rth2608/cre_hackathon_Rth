@@ -266,7 +266,7 @@ function compareRequestsByCreatedAt(a: StoredRequest, b: StoredRequest): number 
 }
 
 function isVerificationResolvedStatus(status: RequestStatus): boolean {
-  return status === "FINALIZED" || isRejectedRequestStatus(status);
+  return status === "FINALIZED" || isRejectedRequestStatus(status) || isFailedRequestStatus(status);
 }
 
 function findEarlierUnresolvedRequest(
@@ -542,7 +542,7 @@ async function syncRequestVectorStatusOnchain(
 }
 
 function isVectorSyncGateStatus(status: RequestStatus): boolean {
-  return status === "FINALIZED" || isRejectedRequestStatus(status);
+  return status === "FINALIZED" || isRejectedRequestStatus(status) || isFailedRequestStatus(status);
 }
 
 function isVectorSyncAppliedForStatus(record: StoredRequest, status: RequestStatus): boolean {
@@ -807,6 +807,10 @@ function isActiveRequestStatusForScreening(status: RequestStatus): boolean {
 
 function isRejectedRequestStatus(status: RequestStatus): boolean {
   return status === "REJECTED_DUPLICATE" || status === "REJECTED_CONFLICT";
+}
+
+function isFailedRequestStatus(status: RequestStatus): boolean {
+  return status === "FAILED_NO_QUORUM" || status === "FAILED_ONCHAIN_SUBMISSION";
 }
 
 interface RequestQueueScreeningResult {

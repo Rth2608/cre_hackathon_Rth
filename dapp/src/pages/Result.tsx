@@ -42,6 +42,7 @@ export default function ResultPage() {
   const [lastRunTraceId, setLastRunTraceId] = useState<string | null>(null);
   const [traceCopied, setTraceCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [runError, setRunError] = useState<string | null>(null);
 
   const load = async () => {
     if (!requestId) {
@@ -144,6 +145,7 @@ export default function ResultPage() {
 
     setRunningVerification(true);
     setError(null);
+    setRunError(null);
     try {
       const runWorldIdToken = requireWorldIdOnRun ? worldIdSession?.token : undefined;
       const updated = await runVerificationForWallet(requestId, walletAddress, runWorldIdToken, activeAccount);
@@ -167,7 +169,10 @@ export default function ResultPage() {
         clearWorldIdSession(walletAddress);
         setWorldIdSession(null);
       }
-      setError(err instanceof ApiRequestError && err.traceId ? `${message} (traceId: ${err.traceId})` : message);
+      const formatted = err instanceof ApiRequestError && err.traceId ? `${message} (traceId: ${err.traceId})` : message;
+      setRunError(formatted);
+      await load();
+      setRunError(formatted);
     } finally {
       setRunningVerification(false);
     }
@@ -334,6 +339,11 @@ export default function ResultPage() {
                   </Link>
                 )}
               </div>
+              {runError && (
+                <p className="error-text">
+                  <strong>Run Verify Error:</strong> {runError}
+                </p>
+              )}
             </article>
 
             <article className="status-card">
