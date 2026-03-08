@@ -12,6 +12,7 @@ out/
 .env.*
 !.env.example
 !.env.example.node
+!.env.example.node.*
 !.env.example.verifier
 !.env.example.verifier.*
 

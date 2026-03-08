@@ -278,6 +278,11 @@ Worker launcher script:
 - `scripts/start_don_workers.sh`
 - optional `DON_WORKER_BASE_PORT` (default `19001`)
   - example: `DON_WORKER_BASE_PORT=19101 bash scripts/start_don_workers.sh`
+- model-specific Railway env templates:
+  - `orchestrator/.env.example.node.gpt`
+  - `orchestrator/.env.example.node.grok`
+  - `orchestrator/.env.example.node.gemini`
+  - `orchestrator/.env.example.node.claude`
 
 For distributed DON-like operation, use:
 

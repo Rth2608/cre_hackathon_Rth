@@ -10,6 +10,9 @@ export default function AppNav({ current }: AppNavProps) {
       <Link to="/" className={current === "submit" || current === "result" ? "nav-link active" : "nav-link"}>
         Request
       </Link>
+      <Link to="/verify" className={current === "verify" ? "nav-link active" : "nav-link"}>
+        Verify
+      </Link>
     </nav>
   );
 }
