@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import {
   Command,
@@ -11,18 +11,12 @@ import {
   type VerifyCommandPayload,
   VerificationLevel as MiniKitVerificationLevel
 } from "@worldcoin/minikit-js";
-import { ConnectButton, useActiveAccount, useActiveWalletChain, useWalletBalance } from "thirdweb/react";
-import { signMessage } from "thirdweb/utils";
+import { ConnectButton, useActiveAccount } from "thirdweb/react";
 import AppNav from "../components/AppNav";
 import {
-  activateNodeChallenge,
-  listNodes,
   listRequests,
-  requestNodeChallenge,
   runVerificationForWallet,
-  sendNodeHeartbeat,
   verifyWorldIdForWallet,
-  type RegisteredNode,
   type RequestRecord,
   type WorldIdSession
 } from "../lib/api";
@@ -30,41 +24,16 @@ import { formatKnownMiniKitMessage } from "../lib/miniKitErrors";
 import { clearWorldIdSession, getWorldIdConfig, loadWorldIdSession, saveWorldIdSession } from "../lib/worldId";
 import { getWorldAppRuntimeMode } from "../lib/worldAppRuntime";
 import { isThirdwebClientConfigured, thirdwebClient } from "../lib/thirdweb";
-import {
-  fetchWorldChainVirtualBalances,
-  getWorldChainVirtualConfig,
-  worldChainSepoliaChain,
-  type WorldChainVirtualBalanceSnapshot
-} from "../lib/worldChain";
+import { getWorldChainVirtualConfig, worldChainSepoliaChain } from "../lib/worldChain";
 
-const MODEL_FAMILIES = ["gpt", "gemini", "claude", "grok"] as const;
-type ModelFamily = (typeof MODEL_FAMILIES)[number];
+const MINI_VERIFY_TIMEOUT_MS = 20_000;
+const MINI_INSTALL_RETRY_COUNT = 2;
+const MINI_INSTALL_RETRY_DELAY_MS = 350;
+
 type MiniVerifyMode = "orb" | "device" | "orb_or_device";
-const STAKE_TOKEN_ADDRESS = (import.meta.env.VITE_STAKE_TOKEN_ADDRESS || "").trim();
 
-interface WorldIdDebugEntry {
-  at: string;
-  event: string;
-  detail?: string;
-}
-
-function buildNodeHeartbeatMessage(input: { walletAddress: string; endpointUrl: string; timestamp: number }): string {
-  return [
-    "CRE Node Heartbeat",
-    `walletAddress: ${input.walletAddress}`,
-    `endpointUrl: ${input.endpointUrl}`,
-    `timestamp: ${input.timestamp}`
-  ].join("\n");
-}
-
-function toLowerAddress(value: string): string {
+function normalizeWorldIdSignal(value: string): string {
   return value.trim().toLowerCase();
-}
-
-function formatEndpointHealth(node: RegisteredNode): string {
-  const latency = typeof node.endpointLatencyMs === "number" ? `${node.endpointLatencyMs}ms` : "-";
-  const error = node.endpointLastError ? ` / ${node.endpointLastError}` : "";
-  return `${node.endpointStatus} (${latency})${error}`;
 }
 
 function formatShortAddress(value: string): string {
@@ -73,27 +42,6 @@ function formatShortAddress(value: string): string {
     return trimmed;
   }
   return `${trimmed.slice(0, 6)}...${trimmed.slice(-4)}`;
-}
-
-function normalizeWorldIdSignal(value: string): string {
-  return value.trim().toLowerCase();
-}
-
-function formatRemainingDuration(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) {
-    return "expired";
-  }
-  const totalMinutes = Math.floor(ms / 60000);
-  const days = Math.floor(totalMinutes / (60 * 24));
-  const hours = Math.floor((totalMinutes % (60 * 24)) / 60);
-  const minutes = totalMinutes % 60;
-  if (days > 0) {
-    return `${days}d ${hours}h`;
-  }
-  if (hours > 0) {
-    return `${hours}h ${minutes}m`;
-  }
-  return `${minutes}m`;
 }
 
 function looksLikeWorldIdV4ProofPayload(value: Record<string, unknown>): boolean {
@@ -110,10 +58,8 @@ function looksLikeWorldIdV4ProofPayload(value: Record<string, unknown>): boolean
     value.result &&
     typeof value.result === "object" &&
     !Array.isArray(value.result) &&
-    (
-      typeof (value.result as Record<string, unknown>).proof === "string" ||
-      typeof (value.result as Record<string, unknown>).nullifier_hash === "string"
-    )
+    (typeof (value.result as Record<string, unknown>).proof === "string" ||
+      typeof (value.result as Record<string, unknown>).nullifier_hash === "string")
   ) {
     return true;
   }
@@ -147,9 +93,9 @@ function hasWorldIdProofMaterial(value: Record<string, unknown>): boolean {
       const response = entry as Record<string, unknown>;
       const responseProof = typeof response.proof === "string" && response.proof.trim().length > 0;
       const responseNullifier = typeof response.nullifier_hash === "string" && response.nullifier_hash.trim().length > 0;
-      const responseNullifierLegacy = typeof response.nullifier === "string" && response.nullifier.trim().length > 0;
+      const responseLegacyNullifier = typeof response.nullifier === "string" && response.nullifier.trim().length > 0;
       const responseMerkleRoot = typeof response.merkle_root === "string" && response.merkle_root.trim().length > 0;
-      if (responseProof || responseNullifier || responseNullifierLegacy || responseMerkleRoot) {
+      if (responseProof || responseNullifier || responseLegacyNullifier || responseMerkleRoot) {
         return true;
       }
     }
@@ -212,7 +158,13 @@ function resolveWorldIdCredentialIdentifier(value: string | undefined): string |
     return undefined;
   }
   const normalized = value.trim().toLowerCase();
-  if (normalized === "orb" || normalized === "secure_document" || normalized === "document" || normalized === "device" || normalized === "face") {
+  if (
+    normalized === "orb" ||
+    normalized === "secure_document" ||
+    normalized === "document" ||
+    normalized === "device" ||
+    normalized === "face"
+  ) {
     return normalized;
   }
   return undefined;
@@ -228,7 +180,6 @@ function buildWorldProofFromMiniKit(
 
   const rawPayload = payload as unknown as Record<string, unknown>;
   if (looksLikeWorldIdV4ProofPayload(rawPayload) && hasWorldIdProofMaterial(rawPayload)) {
-    // Forward World ID 4.0-compatible payloads without reshaping.
     return rawPayload;
   }
 
@@ -237,8 +188,6 @@ function buildWorldProofFromMiniKit(
     return null;
   }
 
-  // MiniKit verify can still return legacy fields. Wrap them into the
-  // World ID 4.0 verify API-compatible shape (protocol_version 3.0).
   const nonceCandidate = input.nonceHint?.trim();
   const nonce = nonceCandidate && nonceCandidate.length > 0 ? nonceCandidate : `mini-${Date.now()}-${Math.random()}`;
   const identifier = resolveWorldIdCredentialIdentifier(legacyPayload.verificationLevel);
@@ -264,50 +213,74 @@ function buildWorldProofFromMiniKit(
   };
 }
 
-function formatDebugDetail(value: unknown): string {
-  if (typeof value === "string") {
-    return value;
+function getWorldIdErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/^network_timeout:/i.test(message)) {
+    return "Network timeout while contacting backend. Please retry.";
   }
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
+  if (message.includes("A verify request is already in flight")) {
+    return "A World ID verification is already in progress. Finish or close the current World App prompt, then retry.";
   }
+  const installErrorMatch = message.match(/^minikit_unavailable:\s*([a-z0-9_]+)$/i);
+  if (installErrorMatch) {
+    return `MiniKit is unavailable (${installErrorMatch[1]}). Open this page inside World App Mini App and retry.`;
+  }
+  const commandUnavailableMatch = message.match(/^minikit_command_unavailable:\s*([a-z0-9_-]+)$/i);
+  if (commandUnavailableMatch) {
+    return `MiniKit command '${commandUnavailableMatch[1]}' is unavailable in this runtime. Update World App and retry.`;
+  }
+  const verifyTimeoutMatch = message.match(/^world_id_verify_timeout:\s*(.+)$/i);
+  if (verifyTimeoutMatch) {
+    return `World App did not return a verify result in time. ${verifyTimeoutMatch[1]}`;
+  }
+  const v4PayloadRequiredMatch = message.match(/^world_id_v4_payload_required:\s*(.+)$/i);
+  if (v4PayloadRequiredMatch) {
+    return `World ID 4.0 payload is required. Received legacy payload (${v4PayloadRequiredMatch[1]}).`;
+  }
+  if (message === "miniapp_runtime_required") {
+    return "Mini App runtime is required. Open this URL from World App Mini Apps.";
+  }
+  const verificationRejectedMatch = message.match(/^world_id_verify_failed:\s*([a-z0-9_]+)$/i);
+  if (verificationRejectedMatch) {
+    return `World ID verification failed (${verificationRejectedMatch[1]}).`;
+  }
+  const normalized = formatKnownMiniKitMessage(message);
+  if (normalized) {
+    return normalized;
+  }
+  return message;
 }
 
-function readMiniKitRuntimeAppId(): string {
-  return (MiniKit.appId ?? "").trim();
+function getMiniVerifyErrorCode(payload: MiniAppVerifyActionPayload): string | null {
+  if (payload.status !== "error") {
+    return null;
+  }
+  const rawPayload = payload as unknown as Record<string, unknown>;
+  const rawCode =
+    (typeof rawPayload.error_code === "string" ? rawPayload.error_code : undefined) ??
+    (typeof rawPayload.errorCode === "string" ? rawPayload.errorCode : undefined);
+  if (!rawCode) {
+    return null;
+  }
+  const normalized = rawCode.trim().toLowerCase();
+  return normalized.length > 0 ? normalized : null;
 }
 
-function readWorldAppDebugContext(): Record<string, unknown> {
-  if (typeof window === "undefined") {
-    return { available: false };
+function isMiniKitInstallUsable(installResult: MiniKitInstallReturnType): boolean {
+  if (installResult.success) {
+    return true;
   }
-  const worldApp = (window as Window & { WorldApp?: Record<string, unknown> }).WorldApp;
-  if (!worldApp) {
-    return { available: false };
-  }
+  return installResult.errorCode === "already_installed";
+}
 
-  const supportedCommands = Array.isArray(worldApp.supported_commands)
-    ? (worldApp.supported_commands as Array<Record<string, unknown>>)
-    : [];
-  const verifyCommand = supportedCommands.find((entry) => entry?.name === "verify");
-  const rawLocation = worldApp.location;
-  let openOrigin: unknown;
-  if (typeof rawLocation === "string") {
-    openOrigin = rawLocation;
-  } else if (typeof rawLocation === "object" && rawLocation && "open_origin" in (rawLocation as Record<string, unknown>)) {
-    openOrigin = (rawLocation as Record<string, unknown>).open_origin;
-  }
-  return {
-    available: true,
-    openOrigin,
-    rawLocation,
-    worldAppVersion: worldApp.world_app_version,
-    deviceOs: worldApp.device_os,
-    verifySupportedVersions: verifyCommand?.supported_versions,
-    miniKitLocation: MiniKit.location ?? null
-  };
+function isRetryableMiniKitInstallError(errorCode: string | undefined): boolean {
+  return errorCode === "app_out_of_date";
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
 }
 
 function installMiniKitWithAppId(appId: string): MiniKitInstallReturnType {
@@ -321,129 +294,19 @@ function installMiniKitWithAppId(appId: string): MiniKitInstallReturnType {
   return installResult;
 }
 
-function summarizeMiniKitPayload(payload: MiniAppVerifyActionPayload): Record<string, unknown> {
-  if (payload.status === "error") {
-    return {
-      status: payload.status,
-      errorCode: payload.error_code
-    };
-  }
-
-  if ("verification_level" in payload) {
-    return {
-      status: payload.status,
-      verificationLevel: payload.verification_level
-    };
-  }
-
-  if ("verifications" in payload) {
-    return {
-      status: payload.status,
-      verificationLevels: payload.verifications.map((item) => item.verification_level),
-      verificationCount: payload.verifications.length
-    };
-  }
-
-  return { status: "unknown" };
+function readMiniKitRuntimeAppId(): string {
+  return (MiniKit.appId ?? "").trim();
 }
 
-function summarizeWorldProof(proof: Record<string, unknown>): Record<string, unknown> {
-  const nestedResult =
-    proof.result && typeof proof.result === "object" && !Array.isArray(proof.result)
-      ? (proof.result as Record<string, unknown>)
-      : null;
-  const firstResponse =
-    Array.isArray(proof.responses) && proof.responses.length > 0 && proof.responses[0] && typeof proof.responses[0] === "object"
-      ? (proof.responses[0] as Record<string, unknown>)
-      : null;
-
-  const proofValue =
-    proof.proof ??
-    nestedResult?.proof ??
-    firstResponse?.proof;
-  const merkleRootValue =
-    proof.merkle_root ??
-    nestedResult?.merkle_root ??
-    firstResponse?.merkle_root;
-  const nullifierHashValue =
-    proof.nullifier_hash ??
-    nestedResult?.nullifier_hash ??
-    firstResponse?.nullifier_hash ??
-    firstResponse?.nullifier;
-  const signalValue =
-    proof.signal ??
-    nestedResult?.signal;
-  const signalHashValue =
-    proof.signal_hash ??
-    nestedResult?.signal_hash ??
-    firstResponse?.signal_hash;
-
-  return {
-    verificationLevel: proof.verification_level,
-    hasMerkleRoot: typeof merkleRootValue === "string" && merkleRootValue.length > 0,
-    hasNullifierHash: typeof nullifierHashValue === "string" && nullifierHashValue.length > 0,
-    hasSignal: typeof signalValue === "string" && signalValue.length > 0,
-    hasSignalHash: typeof signalHashValue === "string" && signalHashValue.length > 0,
-    proofType: Array.isArray(proofValue) ? "array" : typeof proofValue,
-    proofLength:
-      typeof proofValue === "string"
-        ? proofValue.length
-        : Array.isArray(proofValue)
-          ? proofValue.length
-          : undefined
-  };
-}
-
-function getWorldIdErrorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  if (message.includes("A verify request is already in flight")) {
-    return "A World ID verification is already in progress. Finish or close the current World App prompt, then retry.";
+function toMiniVerifyPayload(value: unknown): MiniAppVerifyActionPayload | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
   }
-  const installErrorMatch = message.match(/^minikit_unavailable:\s*([a-z0-9_]+)$/i);
-  if (installErrorMatch) {
-    return `MiniKit is unavailable (${installErrorMatch[1]}). Open this page inside World App Mini App and retry.`;
+  const status = (value as Record<string, unknown>).status;
+  if (status !== "success" && status !== "error") {
+    return null;
   }
-  const commandUnavailableMatch = message.match(/^minikit_command_unavailable:\s*([a-z0-9_-]+)$/i);
-  if (commandUnavailableMatch) {
-    return `MiniKit command '${commandUnavailableMatch[1]}' is unavailable in this World App runtime. Update World App and reopen this Mini App.`;
-  }
-  const verifyTimeoutMatch = message.match(/^world_id_verify_timeout:\s*(.+)$/i);
-  if (verifyTimeoutMatch) {
-    return `World App did not return a verify result in time. ${verifyTimeoutMatch[1]}`;
-  }
-  const appMismatchMatch = message.match(/^world_id_config_mismatch:\s*(.+)$/i);
-  if (appMismatchMatch) {
-    return `World App runtime appId and deployed env appId differ. ${appMismatchMatch[1]}`;
-  }
-  const v4PayloadRequiredMatch = message.match(/^world_id_v4_payload_required:\s*(.+)$/i);
-  if (v4PayloadRequiredMatch) {
-    return `World ID 4.0 payload is required. Received legacy payload (${v4PayloadRequiredMatch[1]}). Use a World ID 4.0-compatible flow.`;
-  }
-
-  const normalized = formatKnownMiniKitMessage(message);
-  if (normalized) {
-    return normalized;
-  }
-  return message;
-}
-
-function isMiniKitInstallUsable(installResult: MiniKitInstallReturnType): boolean {
-  if (installResult.success) {
-    return true;
-  }
-  return installResult.errorCode === "already_installed";
-}
-
-function buildMiniVerifyLevel(
-  mode: MiniVerifyMode
-): MiniKitVerificationLevel | [MiniKitVerificationLevel, MiniKitVerificationLevel] {
-  if (mode === "orb") {
-    return MiniKitVerificationLevel.Orb;
-  }
-  if (mode === "device") {
-    return MiniKitVerificationLevel.Device;
-  }
-  return [MiniKitVerificationLevel.Orb, MiniKitVerificationLevel.Device];
+  return value as MiniAppVerifyActionPayload;
 }
 
 function installMiniKitRawDebugHook(onTrigger: (event: ResponseEvent, payload: unknown) => void): void {
@@ -469,7 +332,7 @@ function installMiniKitRawDebugHook(onTrigger: (event: ResponseEvent, payload: u
       try {
         currentHandler(event, payload);
       } catch {
-        // Avoid breaking command processing due to debug hook errors.
+        // ignore hook errors
       }
     }
     originalTrigger(event, payload);
@@ -482,8 +345,6 @@ interface MiniVerifyResult {
   finalPayload: MiniAppVerifyActionPayload;
 }
 
-const MINI_VERIFY_TIMEOUT_MS = 20_000;
-
 function runMiniVerifyCommand(payload: VerifyCommandInput): Promise<MiniVerifyResult> {
   if (typeof window === "undefined") {
     return Promise.reject(new Error("minikit_unavailable: outside_of_worldapp"));
@@ -493,15 +354,13 @@ function runMiniVerifyCommand(payload: VerifyCommandInput): Promise<MiniVerifyRe
     const timeout = window.setTimeout(() => {
       reject(new Error("world_id_verify_timeout: no verify response returned from World App."));
     }, MINI_VERIFY_TIMEOUT_MS);
+
     try {
       MiniKit.commandsAsync
         .verify(payload)
         .then(({ commandPayload, finalPayload }) => {
           window.clearTimeout(timeout);
-          resolve({
-            commandPayload,
-            finalPayload
-          });
+          resolve({ commandPayload, finalPayload });
         })
         .catch((error) => {
           window.clearTimeout(timeout);
@@ -514,86 +373,75 @@ function runMiniVerifyCommand(payload: VerifyCommandInput): Promise<MiniVerifyRe
   });
 }
 
-function toMiniVerifyPayload(value: unknown): MiniAppVerifyActionPayload | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
+async function ensureMiniKitInstalled(appId: string): Promise<void> {
+  let lastErrorCode = "unknown";
+  for (let attempt = 0; attempt <= MINI_INSTALL_RETRY_COUNT; attempt += 1) {
+    const installResult = installMiniKitWithAppId(appId);
+    if (isMiniKitInstallUsable(installResult)) {
+      return;
+    }
+
+    lastErrorCode = installResult.success ? "unknown" : installResult.errorCode ?? "unknown";
+    const canRetry = isRetryableMiniKitInstallError(installResult.success ? undefined : installResult.errorCode);
+    if (!canRetry || attempt === MINI_INSTALL_RETRY_COUNT) {
+      break;
+    }
+    await wait(MINI_INSTALL_RETRY_DELAY_MS * (attempt + 1));
   }
-  const status = (value as Record<string, unknown>).status;
-  if (status !== "success" && status !== "error") {
-    return null;
+
+  throw new Error(`minikit_unavailable: ${lastErrorCode}`);
+}
+
+function buildMiniVerifyLevel(mode: MiniVerifyMode): [MiniKitVerificationLevel] | [MiniKitVerificationLevel, MiniKitVerificationLevel] {
+  if (mode === "orb") {
+    return [MiniKitVerificationLevel.Orb];
   }
-  return value as MiniAppVerifyActionPayload;
+  if (mode === "device") {
+    return [MiniKitVerificationLevel.Device];
+  }
+  return [MiniKitVerificationLevel.Orb, MiniKitVerificationLevel.Device];
+}
+
+function getStatusTone(status: RequestRecord["status"]): "ok" | "warn" | "bad" {
+  if (status === "FINALIZED") {
+    return "ok";
+  }
+  if (status === "REJECTED_DUPLICATE" || status === "REJECTED_CONFLICT" || status.startsWith("FAILED_")) {
+    return "bad";
+  }
+  return "warn";
 }
 
 export default function VerifyPage() {
   const location = useLocation();
   const activeAccount = useActiveAccount();
-  const activeChain = useActiveWalletChain();
   const walletAddress = activeAccount?.address ?? "";
-  const worldIdSignal = normalizeWorldIdSignal(walletAddress);
   const walletConnected = walletAddress.length > 0;
+  const worldIdSignal = normalizeWorldIdSignal(walletAddress);
   const thirdwebConfigured = isThirdwebClientConfigured();
-  const { data: walletBalance, isLoading: walletBalanceLoading, isError: walletBalanceError } = useWalletBalance({
-    chain: worldChainSepoliaChain,
-    address: walletConnected ? walletAddress : undefined,
-    client: thirdwebClient
-  });
-  const {
-    data: stakeTokenBalance,
-    isLoading: stakeTokenBalanceLoading,
-    isError: stakeTokenBalanceError
-  } = useWalletBalance(
-    {
-      chain: worldChainSepoliaChain,
-      address: walletConnected ? walletAddress : undefined,
-      client: thirdwebClient,
-      tokenAddress: STAKE_TOKEN_ADDRESS || undefined
-    },
-    {
-      enabled: Boolean(STAKE_TOKEN_ADDRESS) && walletConnected
-    }
-  );
   const worldIdConfig = getWorldIdConfig();
+  const worldAppMiniRuntime = getWorldAppRuntimeMode() === "miniapp";
   const miniWorldIdConfigured = worldIdConfig.mini.configured;
   const worldChainVirtualConfig = getWorldChainVirtualConfig();
-  const worldAppMiniRuntime = getWorldAppRuntimeMode() === "miniapp";
 
   const [requests, setRequests] = useState<RequestRecord[]>([]);
-  const [nodes, setNodes] = useState<RegisteredNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [registeringNode, setRegisteringNode] = useState(false);
-  const [sendingHeartbeat, setSendingHeartbeat] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const [runningRequestId, setRunningRequestId] = useState<string | null>(null);
-  const [registrationMessage, setRegistrationMessage] = useState<string | null>(null);
   const [verifyingWorldId, setVerifyingWorldId] = useState(false);
   const [miniKitAvailable, setMiniKitAvailable] = useState(false);
   const [worldIdSession, setWorldIdSession] = useState<WorldIdSession | null>(null);
-  const [worldIdDebugLogs, setWorldIdDebugLogs] = useState<WorldIdDebugEntry[]>([]);
-  const [worldChainBalances, setWorldChainBalances] = useState<WorldChainVirtualBalanceSnapshot | null>(null);
-  const [worldChainBalancesLoading, setWorldChainBalancesLoading] = useState(false);
-  const [worldChainBalancesError, setWorldChainBalancesError] = useState<string | null>(null);
   const [miniVerifyMode, setMiniVerifyMode] = useState<MiniVerifyMode>("orb_or_device");
-  const miniVerifyInFlightRef = useRef(false);
+
   const miniVerifyRawPayloadsRef = useRef<MiniAppVerifyActionPayload[]>([]);
-  const [walletAddressCopied, setWalletAddressCopied] = useState(false);
-  const [nodeForm, setNodeForm] = useState<{
-    selectedModelFamilies: ModelFamily[];
-    stakeAmount: string;
-    participationEnabled: boolean;
-  }>({
-    selectedModelFamilies: ["gpt"],
-    stakeAmount: "1000",
-    participationEnabled: true
-  });
 
   const load = async () => {
     setLoading(true);
     setError(null);
     try {
-      const [requestItems, nodeItems] = await Promise.all([listRequests(), listNodes()]);
-      setRequests(requestItems);
-      setNodes(nodeItems);
+      const next = await listRequests();
+      setRequests(next);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -614,41 +462,17 @@ export default function VerifyPage() {
   }, [walletAddress, walletConnected]);
 
   useEffect(() => {
-    if (!walletConnected || !thirdwebConfigured) {
-      setWorldChainBalances(null);
-      setWorldChainBalancesError(null);
-      setWorldChainBalancesLoading(false);
-      return;
-    }
-
-    let cancelled = false;
-    setWorldChainBalancesLoading(true);
-    setWorldChainBalancesError(null);
-
-    void fetchWorldChainVirtualBalances(walletAddress)
-      .then((snapshot) => {
-        if (cancelled) {
-          return;
-        }
-        setWorldChainBalances(snapshot);
-      })
-      .catch((fetchError) => {
-        if (cancelled) {
-          return;
-        }
-        setWorldChainBalancesError(fetchError instanceof Error ? fetchError.message : String(fetchError));
-      })
-      .finally(() => {
-        if (cancelled) {
-          return;
-        }
-        setWorldChainBalancesLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [walletAddress, walletConnected, thirdwebConfigured]);
+    installMiniKitRawDebugHook((event, payload) => {
+      if (event !== "miniapp-verify-action") {
+        return;
+      }
+      const parsedPayload = toMiniVerifyPayload(payload);
+      if (!parsedPayload) {
+        return;
+      }
+      miniVerifyRawPayloadsRef.current = [...miniVerifyRawPayloadsRef.current.slice(-9), parsedPayload];
+    });
+  }, []);
 
   useEffect(() => {
     if (!walletConnected || !miniWorldIdConfigured || !worldAppMiniRuntime) {
@@ -665,451 +489,10 @@ export default function VerifyPage() {
     }
   }, [walletConnected, miniWorldIdConfigured, worldAppMiniRuntime, worldIdConfig.mini.appId]);
 
-  const appendWorldIdDebugLog = (event: string, detail?: unknown) => {
-    const entry: WorldIdDebugEntry = {
-      at: new Date().toISOString(),
-      event,
-      detail: detail === undefined ? undefined : formatDebugDetail(detail)
-    };
-    console.info("[world-id-debug]", event, detail ?? "");
-    setWorldIdDebugLogs((prev) => [...prev.slice(-59), entry]);
-  };
-
-  useEffect(() => {
-    installMiniKitRawDebugHook((event, payload) => {
-      if (event === "miniapp-verify-action") {
-        const parsedPayload = toMiniVerifyPayload(payload);
-        if (parsedPayload) {
-          miniVerifyRawPayloadsRef.current = [...miniVerifyRawPayloadsRef.current.slice(-9), parsedPayload];
-        }
-        appendWorldIdDebugLog("mini.verify.raw_event", payload);
-      }
-    });
-  }, [appendWorldIdDebugLog]);
-
-  const worldIdDebugText = useMemo(() => {
-    return worldIdDebugLogs
-      .map((entry) => (entry.detail ? `${entry.at} ${entry.event} ${entry.detail}` : `${entry.at} ${entry.event}`))
-      .join("\n");
-  }, [worldIdDebugLogs]);
-
-  const verifyWorldIdWithProof = async (input: {
-    proof: Record<string, unknown>;
-    sourceLabel: string;
-    appId: string;
-    action: string;
-    clientSource: "miniapp";
-  }) => {
-    if (!activeAccount) {
-      throw new Error("wallet_account_required");
-    }
-
-    appendWorldIdDebugLog("backend.verify.request", {
-      source: input.sourceLabel,
-      appId: input.appId,
-      action: input.action,
-      clientSource: input.clientSource,
-      proof: summarizeWorldProof(input.proof)
-    });
-    try {
-      const result = await verifyWorldIdForWallet({
-        walletAddress,
-        proof: input.proof,
-        appId: input.appId,
-        action: input.action,
-        clientSource: input.clientSource,
-        account: activeAccount
-      });
-      appendWorldIdDebugLog("backend.verify.success", {
-        profileId: result.session.profileId,
-        verificationLevel: result.session.verificationLevel,
-        source: result.session.source,
-        expiresAt: result.session.expiresAt
-      });
-      saveWorldIdSession(walletAddress, result.session);
-      setWorldIdSession(result.session);
-      setRegistrationMessage(
-        `${input.sourceLabel} verification succeeded. Session valid until ${new Date(result.session.expiresAt).toLocaleString()}.`
-      );
-    } catch (error) {
-      appendWorldIdDebugLog("backend.verify.error", {
-        message: getWorldIdErrorMessage(error),
-        raw: error instanceof Error ? error.message : String(error)
-      });
-      throw error;
-    }
-  };
-
-  const onVerifyWorldIdMiniApp = async () => {
-    if (miniVerifyInFlightRef.current) {
-      appendWorldIdDebugLog("mini.verify.skipped_duplicate_dispatch", { reason: "in_flight" });
-      return;
-    }
-
-    const requestedVerificationLevel = buildMiniVerifyLevel(miniVerifyMode);
-    setRegistrationMessage(null);
-    setError(null);
-    setWorldIdDebugLogs([]);
-    appendWorldIdDebugLog("mini.verify.start", {
-      envMiniAppId: worldIdConfig.mini.appId,
-      envMiniAction: worldIdConfig.mini.action,
-      selectedVerificationMode: miniVerifyMode,
-      requestedVerificationLevel,
-      worldApp: readWorldAppDebugContext()
-    });
-
-    if (!walletConnected) {
-      setError("Connect wallet before World ID verification.");
-      return;
-    }
-    if (!miniWorldIdConfigured) {
-      setError("Missing mini app World ID config. Set VITE_WORLD_ID_MINI_APP_ID / VITE_WORLD_ID_MINI_ACTION.");
-      return;
-    }
-    miniVerifyInFlightRef.current = true;
-    miniVerifyRawPayloadsRef.current = [];
-
-    setVerifyingWorldId(true);
-    try {
-      appendWorldIdDebugLog("mini.install.before", { appId: readMiniKitRuntimeAppId() || null });
-      const installResult = installMiniKitWithAppId(worldIdConfig.mini.appId);
-      appendWorldIdDebugLog("mini.install.result", {
-        ...installResult,
-        appIdAfterInstall: readMiniKitRuntimeAppId() || null
-      });
-      if (!isMiniKitInstallUsable(installResult)) {
-        const errorCode = installResult.success ? "unknown" : installResult.errorCode;
-        throw new Error(`minikit_unavailable: ${errorCode}`);
-      }
-      const runtimeMiniAppId = readMiniKitRuntimeAppId();
-      const verifyAvailable = isCommandAvailable(Command.Verify);
-      appendWorldIdDebugLog("mini.command.availability", {
-        verifyAvailable,
-        worldAppVersion: MiniKit.deviceProperties.worldAppVersion,
-        deviceOS: MiniKit.deviceProperties.deviceOS
-      });
-      appendWorldIdDebugLog("mini.runtime.state", {
-        runtimeMiniAppId,
-        miniKitLocation: MiniKit.location ?? null
-      });
-      if (!verifyAvailable) {
-        throw new Error("minikit_command_unavailable: verify");
-      }
-      if (runtimeMiniAppId && worldIdConfig.mini.appId && runtimeMiniAppId !== worldIdConfig.mini.appId) {
-        throw new Error(`world_id_config_mismatch: runtime_app_id=${runtimeMiniAppId}, env_app_id=${worldIdConfig.mini.appId}`);
-      }
-      const miniAppIdForVerify = runtimeMiniAppId || worldIdConfig.mini.appId;
-
-      const { commandPayload, finalPayload } = await runMiniVerifyCommand({
-        action: worldIdConfig.mini.action,
-        signal: worldIdSignal,
-        verification_level: requestedVerificationLevel
-      });
-      if (!commandPayload) {
-        throw new Error("minikit_command_unavailable: verify");
-      }
-      appendWorldIdDebugLog("mini.verify.command_payload", commandPayload);
-      appendWorldIdDebugLog(
-        "mini.verify.final_payload",
-        finalPayload.status === "error" ? finalPayload : summarizeMiniKitPayload(finalPayload)
-      );
-
-      const proofBuildInput = {
-        action: worldIdConfig.mini.action,
-        signal: worldIdSignal,
-        signalHashHint: typeof commandPayload.signal === "string" ? commandPayload.signal : undefined,
-        nonceHint: typeof commandPayload.timestamp === "string" ? commandPayload.timestamp : undefined
-      };
-      const proofCandidates: Array<{ source: string; payload: MiniAppVerifyActionPayload }> = [
-        ...miniVerifyRawPayloadsRef.current.slice().reverse().map((payload, index) => ({
-          source: `raw_event_${index + 1}`,
-          payload
-        })),
-        { source: "final_payload", payload: finalPayload }
-      ];
-      let proof: Record<string, unknown> | null = null;
-      let proofSource = "none";
-      for (const candidate of proofCandidates) {
-        const builtProof = buildWorldProofFromMiniKit(candidate.payload, proofBuildInput);
-        if (!builtProof) {
-          continue;
-        }
-        proof = builtProof;
-        proofSource = candidate.source;
-        break;
-      }
-      if (!proof) {
-        throw new Error("world_id_v4_payload_required: miniapp_returned_legacy_payload");
-      }
-      appendWorldIdDebugLog("mini.verify.proof_selected", {
-        source: proofSource,
-        candidateCount: proofCandidates.length,
-        proof: summarizeWorldProof(proof)
-      });
-
-      await verifyWorldIdWithProof({
-        proof,
-        sourceLabel: "Mini App",
-        appId: miniAppIdForVerify,
-        action: worldIdConfig.mini.action,
-        clientSource: "miniapp"
-      });
-    } catch (err) {
-      appendWorldIdDebugLog("mini.verify.error", {
-        message: getWorldIdErrorMessage(err),
-        raw: err instanceof Error ? err.message : String(err)
-      });
-      setError(getWorldIdErrorMessage(err));
-    } finally {
-      miniVerifyInFlightRef.current = false;
-      setVerifyingWorldId(false);
-    }
-  };
-
-  const onClearWorldId = () => {
-    if (!walletConnected) {
-      return;
-    }
-    clearWorldIdSession(walletAddress);
-    setWorldIdSession(null);
-    setRegistrationMessage("World ID session was cleared for this wallet.");
-  };
-
-  const onRegisterNode = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setRegistrationMessage(null);
-
-    if (!thirdwebConfigured) {
-      setError("Missing VITE_THIRDWEB_CLIENT_ID. Configure dapp/.env and restart.");
-      return;
-    }
-    if (!walletConnected || !activeAccount) {
-      setError("Connect wallet before registering a node.");
-      return;
-    }
-    if (nodeForm.selectedModelFamilies.length === 0) {
-      setError("Select at least one model family.");
-      return;
-    }
-    if (!worldIdSession?.token) {
-      setError("Verify World ID first and obtain a session token.");
-      return;
-    }
-
-    setRegisteringNode(true);
-    setError(null);
-    try {
-      const challengeResult = await requestNodeChallenge({
-        walletAddress,
-        selectedModelFamilies: nodeForm.selectedModelFamilies,
-        stakeAmount: nodeForm.stakeAmount,
-        participationEnabled: nodeForm.participationEnabled,
-        worldIdToken: worldIdSession.token,
-        account: activeAccount
-      });
-      const challenge = challengeResult.challenge;
-      const signature = await signMessage({
-        account: activeAccount,
-        message: challenge.challengeMessage
-      });
-
-      const activated = await activateNodeChallenge({
-        challengeId: challenge.challengeId,
-        walletAddress,
-        signature,
-        account: activeAccount
-      });
-
-      const health = activated.endpointProbe.ok ? "HEALTHY" : `UNHEALTHY (${activated.endpointProbe.error ?? "unknown"})`;
-      const lifecycleTx = activated.lifecycleOnchainReceipt?.txHash
-        ? `, tx=${activated.lifecycleOnchainReceipt.txHash}`
-        : "";
-      setRegistrationMessage(
-        `Node ${activated.node.nodeId} activated. endpoint=${health}, x402=${challengeResult.paymentReceipt.paymentRef.slice(0, 14)}...${lifecycleTx}`
-      );
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setRegisteringNode(false);
-    }
-  };
-
-  const myActiveNode = useMemo(
-    () => nodes.find((node) => node.walletAddress.toLowerCase() === walletAddress.toLowerCase() && node.status === "ACTIVE"),
-    [nodes, walletAddress]
-  );
-
-  const nativeBalanceText =
-    walletBalanceLoading
-      ? "Loading..."
-      : walletBalance
-        ? `${walletBalance.displayValue} ${walletBalance.symbol}`
-        : walletBalanceError
-          ? "Failed to load"
-          : "-";
-  const stakeTokenBalanceText =
-    !STAKE_TOKEN_ADDRESS
-      ? "Not configured"
-      : stakeTokenBalanceLoading
-        ? "Loading..."
-        : stakeTokenBalance
-          ? `${stakeTokenBalance.displayValue} ${stakeTokenBalance.symbol}`
-          : stakeTokenBalanceError
-            ? "Failed to load"
-            : "-";
-  const chainText = `${worldChainVirtualConfig.chainName} (virtual, id: ${worldChainVirtualConfig.chainId})`;
-  const connectedChainText = activeChain ? `${activeChain.name} (id: ${activeChain.id})` : "Not connected";
-  const connectedChainMismatch = Boolean(activeChain && activeChain.id !== worldChainVirtualConfig.chainId);
-  const worldIdStatus = worldIdSession
-    ? `Verified (${worldIdSession.verificationLevel ?? "unknown"})`
-    : "Not verified";
   const worldIdSessionActive =
     worldIdSession && Number.isFinite(Date.parse(worldIdSession.expiresAt))
       ? Date.parse(worldIdSession.expiresAt) > Date.now()
       : Boolean(worldIdSession?.token);
-  const worldIdRemaining =
-    worldIdSession && Number.isFinite(Date.parse(worldIdSession.expiresAt))
-      ? formatRemainingDuration(Date.parse(worldIdSession.expiresAt) - Date.now())
-      : "-";
-  const nodeStatusText = myActiveNode ? `ACTIVE / ${formatEndpointHealth(myActiveNode)}` : "NOT REGISTERED";
-  const canCreateRequest = walletConnected && thirdwebConfigured;
-  const canRegisterNode =
-    walletConnected && thirdwebConfigured && Boolean(worldIdSession?.token) && nodeForm.selectedModelFamilies.length > 0;
-  const canSendHeartbeat = walletConnected && Boolean(myActiveNode?.endpointUrl);
-
-  const createRequestReason = !walletConnected
-    ? "Connect wallet"
-    : !thirdwebConfigured
-      ? "Set VITE_THIRDWEB_CLIENT_ID"
-      : "Ready";
-  const registerNodeReason = !walletConnected
-    ? "Connect wallet"
-    : !thirdwebConfigured
-      ? "Set VITE_THIRDWEB_CLIENT_ID"
-      : !worldIdSession?.token
-        ? "Complete World ID verification"
-        : nodeForm.selectedModelFamilies.length === 0
-          ? "Select at least one model"
-          : "Ready";
-  const heartbeatReason = !walletConnected
-    ? "Connect wallet"
-    : !myActiveNode
-      ? "Activate node first"
-      : !myActiveNode.endpointUrl
-        ? "Node endpoint missing"
-        : "Ready";
-  const worldChainNativeBalanceText = worldChainBalancesLoading
-    ? "Loading..."
-    : worldChainBalances?.native
-      ? `${worldChainBalances.native.displayValue} ${worldChainBalances.native.symbol}`
-      : worldChainBalancesError
-        ? "Failed to load"
-        : "-";
-
-  const onCopyWalletAddress = async () => {
-    if (!walletConnected || !walletAddress) {
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(walletAddress);
-      setWalletAddressCopied(true);
-      window.setTimeout(() => setWalletAddressCopied(false), 1200);
-    } catch {
-      setWalletAddressCopied(false);
-    }
-  };
-
-  const onSendHeartbeat = async () => {
-    setRegistrationMessage(null);
-
-    if (!walletConnected || !activeAccount || !myActiveNode) {
-      setError("Connect wallet and activate node first.");
-      return;
-    }
-    if (!myActiveNode.endpointUrl) {
-      setError("Current node has no endpoint URL.");
-      return;
-    }
-
-    setSendingHeartbeat(true);
-    setError(null);
-    try {
-      const timestamp = Date.now();
-      const heartbeatMessage = buildNodeHeartbeatMessage({
-        walletAddress: toLowerAddress(walletAddress),
-        endpointUrl: myActiveNode.endpointUrl,
-        timestamp
-      });
-      const signature = await signMessage({
-        account: activeAccount,
-        message: heartbeatMessage
-      });
-
-      const result = await sendNodeHeartbeat({
-        walletAddress,
-        endpointUrl: myActiveNode.endpointUrl,
-        timestamp,
-        signature,
-        account: activeAccount
-      });
-
-      const lifecycleTx = result.lifecycleOnchainReceipt?.txHash ? `, tx=${result.lifecycleOnchainReceipt.txHash}` : "";
-      setRegistrationMessage(
-        `Heartbeat accepted. endpoint=${result.node.endpointStatus}, checkedAt=${result.node.endpointLastCheckedAt ?? "-"}${lifecycleTx}`
-      );
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSendingHeartbeat(false);
-    }
-  };
-
-  const onRunQueuedRequest = async (record: RequestRecord) => {
-    setRegistrationMessage(null);
-    setError(null);
-
-    if (!walletConnected || !activeAccount) {
-      setError("Connect wallet before running queued verification.");
-      return;
-    }
-    if (record.input.submitterAddress.trim().toLowerCase() !== walletAddress.trim().toLowerCase()) {
-      setError("Connected wallet must match request submitter.");
-      return;
-    }
-    if (!worldIdSession?.token || !worldIdSessionActive) {
-      setError("Verify World ID first to run queued verification.");
-      return;
-    }
-
-    setRunningRequestId(record.requestId);
-    try {
-      await runVerificationForWallet(record.requestId, walletAddress, worldIdSession.token, activeAccount);
-      clearWorldIdSession(walletAddress);
-      setWorldIdSession(null);
-      setRegistrationMessage(`Queued request ${record.requestId} processed.`);
-      await load();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (message.includes("world_id_token_")) {
-        clearWorldIdSession(walletAddress);
-        setWorldIdSession(null);
-      }
-      setError(message);
-    } finally {
-      setRunningRequestId(null);
-    }
-  };
-
-  const returnToPath = useMemo(() => {
-    const params = new URLSearchParams(location.search);
-    const raw = params.get("returnTo")?.trim() ?? "";
-    if (!raw || !raw.startsWith("/") || raw.startsWith("//")) {
-      return null;
-    }
-    return raw;
-  }, [location.search]);
 
   const sortedRequests = useMemo(() => {
     return [...requests].sort((a, b) => {
@@ -1128,31 +511,184 @@ export default function VerifyPage() {
     });
   }, [requests]);
 
-  const toggleModelFamily = (family: ModelFamily) => {
-    setNodeForm((prev) => {
-      const exists = prev.selectedModelFamilies.includes(family);
-      const selectedModelFamilies = exists
-        ? prev.selectedModelFamilies.filter((item) => item !== family)
-        : [...prev.selectedModelFamilies, family];
+  const queueSummary = useMemo(() => {
+    const summary = {
+      total: requests.length,
+      pending: 0,
+      running: 0,
+      finalized: 0,
+      rejected: 0,
+      failed: 0
+    };
+    for (const item of requests) {
+      if (item.status === "PENDING") summary.pending += 1;
+      else if (item.status === "RUNNING") summary.running += 1;
+      else if (item.status === "FINALIZED") summary.finalized += 1;
+      else if (item.status === "REJECTED_DUPLICATE" || item.status === "REJECTED_CONFLICT") summary.rejected += 1;
+      else if (item.status.startsWith("FAILED_")) summary.failed += 1;
+    }
+    return summary;
+  }, [requests]);
 
-      return {
-        ...prev,
-        selectedModelFamilies
+  const returnToPath = useMemo(() => {
+    const params = new URLSearchParams(location.search);
+    const raw = params.get("returnTo")?.trim() ?? "";
+    if (!raw || !raw.startsWith("/") || raw.startsWith("//")) {
+      return null;
+    }
+    return raw;
+  }, [location.search]);
+
+  const onVerifyWorldIdMiniApp = async () => {
+    setError(null);
+    setNotice(null);
+
+    if (!walletConnected || !activeAccount) {
+      setError("Connect wallet before World ID verification.");
+      return;
+    }
+    if (!worldAppMiniRuntime) {
+      setError("Mini App runtime is required. Open this app from World App Mini Apps.");
+      return;
+    }
+    if (!miniWorldIdConfigured) {
+      setError("Missing mini app World ID config. Set VITE_WORLD_ID_MINI_APP_ID / VITE_WORLD_ID_MINI_ACTION.");
+      return;
+    }
+
+    miniVerifyRawPayloadsRef.current = [];
+    setVerifyingWorldId(true);
+    try {
+      const requestedVerificationLevel = buildMiniVerifyLevel(miniVerifyMode);
+
+      await ensureMiniKitInstalled(worldIdConfig.mini.appId);
+      const runtimeMiniAppId = readMiniKitRuntimeAppId();
+      const verifyAvailable = isCommandAvailable(Command.Verify);
+      if (!verifyAvailable) {
+        throw new Error("minikit_command_unavailable: verify");
+      }
+      if (runtimeMiniAppId && worldIdConfig.mini.appId && runtimeMiniAppId !== worldIdConfig.mini.appId) {
+        throw new Error(
+          `world_id_config_mismatch: runtime_app_id=${runtimeMiniAppId}, env_app_id=${worldIdConfig.mini.appId}`
+        );
+      }
+
+      const miniAppIdForVerify = runtimeMiniAppId || worldIdConfig.mini.appId;
+      const { commandPayload, finalPayload } = await runMiniVerifyCommand({
+        action: worldIdConfig.mini.action,
+        signal: worldIdSignal,
+        verification_level: requestedVerificationLevel
+      });
+      if (!commandPayload) {
+        throw new Error("minikit_command_unavailable: verify");
+      }
+
+      const miniVerifyErrorCode = getMiniVerifyErrorCode(finalPayload);
+      if (miniVerifyErrorCode) {
+        throw new Error(`world_id_verify_failed: ${miniVerifyErrorCode}`);
+      }
+
+      const proofBuildInput = {
+        action: worldIdConfig.mini.action,
+        signal: worldIdSignal,
+        signalHashHint: typeof commandPayload.signal === "string" ? commandPayload.signal : undefined,
+        nonceHint: typeof commandPayload.timestamp === "string" ? commandPayload.timestamp : undefined
       };
-    });
+
+      const proofCandidates: Array<{ payload: MiniAppVerifyActionPayload }> = [
+        ...miniVerifyRawPayloadsRef.current.slice().reverse().map((payload) => ({ payload })),
+        { payload: finalPayload }
+      ];
+
+      let proof: Record<string, unknown> | null = null;
+      for (const candidate of proofCandidates) {
+        const builtProof = buildWorldProofFromMiniKit(candidate.payload, proofBuildInput);
+        if (!builtProof) {
+          continue;
+        }
+        proof = builtProof;
+        break;
+      }
+
+      if (!proof) {
+        throw new Error("world_id_v4_payload_required: miniapp_returned_legacy_payload");
+      }
+
+      const result = await verifyWorldIdForWallet({
+        walletAddress,
+        proof,
+        appId: miniAppIdForVerify,
+        action: worldIdConfig.mini.action,
+        clientSource: "miniapp",
+        account: activeAccount
+      });
+
+      saveWorldIdSession(walletAddress, result.session);
+      setWorldIdSession(result.session);
+      setNotice(`World ID verified. Session valid until ${new Date(result.session.expiresAt).toLocaleString()}.`);
+    } catch (err) {
+      setError(getWorldIdErrorMessage(err));
+    } finally {
+      setVerifyingWorldId(false);
+    }
+  };
+
+  const onClearWorldId = () => {
+    if (!walletConnected) {
+      return;
+    }
+    clearWorldIdSession(walletAddress);
+    setWorldIdSession(null);
+    setNotice("World ID session was cleared for this wallet.");
+  };
+
+  const onRunQueuedRequest = async (record: RequestRecord) => {
+    setNotice(null);
+    setError(null);
+
+    if (!walletConnected || !activeAccount) {
+      setError("Connect wallet before running verification.");
+      return;
+    }
+
+    if (record.input.submitterAddress.trim().toLowerCase() !== walletAddress.trim().toLowerCase()) {
+      setError("Connected wallet must match request submitter.");
+      return;
+    }
+
+    if (!worldIdSession?.token || !worldIdSessionActive) {
+      setError("Verify World ID first to run queued verification.");
+      return;
+    }
+
+    setRunningRequestId(record.requestId);
+    try {
+      await runVerificationForWallet(record.requestId, walletAddress, worldIdSession.token, activeAccount);
+      clearWorldIdSession(walletAddress);
+      setWorldIdSession(null);
+      setNotice(`Verification triggered for ${record.requestId}.`);
+      await load();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes("world_id_token_")) {
+        clearWorldIdSession(walletAddress);
+        setWorldIdSession(null);
+      }
+      setError(message);
+    } finally {
+      setRunningRequestId(null);
+    }
   };
 
   return (
     <div className="page-shell">
       <main className="panel">
         <AppNav current="verify" />
+
         <header className="hero compact">
-          <p className="eyebrow">Verifier Participation</p>
-          <h1>Operator Verify Settings</h1>
-          <p>
-            DON-like flow: create registration challenge, sign with wallet, then activate node. Node ID is fixed to your
-            wallet address.
-          </p>
+          <p className="eyebrow">Mini App Verify</p>
+          <h1>Verification Dashboard</h1>
+          <p>Verify World ID, then run queued request verification from this wallet.</p>
           <div className="wallet-row">
             {thirdwebConfigured ? (
               <ConnectButton
@@ -1168,14 +704,7 @@ export default function VerifyPage() {
             {walletConnected && <p className="wallet-info mono">Connected: {walletAddress}</p>}
             {walletConnected && (
               <p className="wallet-info mono">
-                Virtual Balance ({worldChainVirtualConfig.chainName}):{" "}
-                {walletBalanceLoading
-                  ? "Loading..."
-                  : walletBalance
-                    ? `${walletBalance.displayValue} ${walletBalance.symbol}`
-                    : walletBalanceError
-                      ? "Failed to load"
-                      : "-"}
+                Wallet: {formatShortAddress(walletAddress)} / {worldChainVirtualConfig.chainName}
               </p>
             )}
           </div>
@@ -1189,118 +718,24 @@ export default function VerifyPage() {
               </Link>
             )}
             <button type="button" className="secondary" onClick={load}>
-              Refresh List
+              Refresh
             </button>
           </div>
         </header>
 
         <section className="status-card">
-          <h2>Wallet & Access Snapshot</h2>
-          <div className="snapshot-grid">
-            <div className="snapshot-item">
-              <p className="snapshot-label">Wallet</p>
-              <p className="wallet-info mono">{walletConnected ? walletAddress : "-"}</p>
-              {walletConnected && (
-                <button type="button" className="secondary snapshot-copy-btn" onClick={onCopyWalletAddress}>
-                  {walletAddressCopied ? "Copied" : "Copy Address"}
-                </button>
-              )}
-            </div>
-            <div className="snapshot-item">
-              <p className="snapshot-label">Short Address</p>
-              <p className="wallet-info mono">{walletConnected ? formatShortAddress(walletAddress) : "-"}</p>
-            </div>
-            <div className="snapshot-item">
-              <p className="snapshot-label">Network</p>
-              <p className="wallet-info">{chainText}</p>
-              <p className="wallet-info small">Connected wallet chain: {connectedChainText}</p>
-              {connectedChainMismatch && (
-                <p className="config-warning">
-                  Connected chain differs. Balance/verification display is fixed to virtual {worldChainVirtualConfig.chainName}.
-                </p>
-              )}
-            </div>
-            <div className="snapshot-item">
-              <p className="snapshot-label">Native Balance</p>
-              <p className="wallet-info mono">{nativeBalanceText}</p>
-            </div>
-            <div className="snapshot-item">
-              <p className="snapshot-label">Stake Token Balance</p>
-              <p className="wallet-info mono">{stakeTokenBalanceText}</p>
-              {!STAKE_TOKEN_ADDRESS && <p className="config-warning">Set VITE_STAKE_TOKEN_ADDRESS to enable.</p>}
-            </div>
-            <div className="snapshot-item">
-              <p className="snapshot-label">World ID</p>
-              <p className="wallet-info">{worldIdStatus}</p>
-              <p className="wallet-info small">
-                expires in {worldIdRemaining}
-                {worldIdSession?.expiresAt ? ` / ${new Date(worldIdSession.expiresAt).toLocaleString()}` : ""}
-              </p>
-            </div>
-            <div className="snapshot-item">
-              <p className="snapshot-label">Node Status</p>
-              <p className="wallet-info">{nodeStatusText}</p>
-            </div>
-            <div className="snapshot-item">
-              <p className="snapshot-label">{worldChainVirtualConfig.chainName}</p>
-              <p className="wallet-info">chain id: {worldChainVirtualConfig.chainId}</p>
-              <p className="wallet-info small mono">
-                rpc: {worldChainVirtualConfig.rpcUrl || "thirdweb default rpc"}
-              </p>
-              <p className="wallet-info mono">native: {worldChainNativeBalanceText}</p>
-            </div>
-            <div className="snapshot-item">
-              <p className="snapshot-label">Virtual Token Balances</p>
-              {!thirdwebConfigured ? (
-                <p className="config-warning">Set VITE_THIRDWEB_CLIENT_ID first.</p>
-              ) : worldChainVirtualConfig.tokenAddresses.length === 0 ? (
-                <p className="wallet-info small">No ERC20 virtual tokens configured.</p>
-              ) : worldChainBalancesLoading ? (
-                <p className="wallet-info mono">Loading token balances...</p>
-              ) : worldChainBalancesError ? (
-                <p className="config-warning">Failed to load: {worldChainBalancesError}</p>
-              ) : (
-                <div className="token-balance-list">
-                  {(worldChainBalances?.tokens ?? []).map((item) => (
-                    <p key={item.tokenAddress} className="wallet-info mono small">
-                      {item.tokenAddress}:{" "}
-                      {item.balance ? `${item.balance.displayValue} ${item.balance.symbol}` : item.error ? "Failed" : "-"}
-                    </p>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-          <div className="snapshot-capabilities">
-            <p className="snapshot-label">Current Availability</p>
-            <div className="snapshot-capability-list">
-              <p className={`snapshot-capability ${canCreateRequest ? "ok" : "warn"}`}>
-                Request Create: {canCreateRequest ? "READY" : "BLOCKED"} ({createRequestReason})
-              </p>
-              <p className={`snapshot-capability ${canRegisterNode ? "ok" : "warn"}`}>
-                Node Register: {canRegisterNode ? "READY" : "BLOCKED"} ({registerNodeReason})
-              </p>
-              <p className={`snapshot-capability ${canSendHeartbeat ? "ok" : "warn"}`}>
-                Node Heartbeat: {canSendHeartbeat ? "READY" : "BLOCKED"} ({heartbeatReason})
-              </p>
-            </div>
-          </div>
-        </section>
-
-        <section className="status-card">
-          <h2>World ID Verification (Mini App Only)</h2>
-          <p>World ID verification is only supported inside World App Mini App runtime.</p>
+          <h2>World ID Session</h2>
           <p className="config-warning runtime-note">
             {worldAppMiniRuntime
               ? "Runtime: World App Mini App (supported)"
-              : "Runtime: Web Browser (unsupported). Open this app from World App Mini Apps."}
+              : "Runtime: Web Browser (unsupported). Open from World App Mini Apps."}
           </p>
           <p className="config-warning">
             Mini App: {worldIdConfig.mini.appId || "-"} / {worldIdConfig.mini.action || "-"}
           </p>
           <div className="action-row">
             <label>
-              Mini Level
+              Verify Level
               <select
                 value={miniVerifyMode}
                 onChange={(event) => setMiniVerifyMode(event.target.value as MiniVerifyMode)}
@@ -1314,7 +749,7 @@ export default function VerifyPage() {
             <button
               type="button"
               onClick={onVerifyWorldIdMiniApp}
-              disabled={!walletConnected || verifyingWorldId || !miniWorldIdConfigured || !miniKitAvailable || !worldAppMiniRuntime}
+              disabled={!walletConnected || !worldAppMiniRuntime || !miniWorldIdConfigured || !miniKitAvailable || verifyingWorldId}
             >
               {verifyingWorldId ? "Verifying..." : "Verify in World Mini App"}
             </button>
@@ -1322,143 +757,63 @@ export default function VerifyPage() {
               Clear Session
             </button>
           </div>
-          {!worldAppMiniRuntime && (
-            <p className="config-warning">Mini App runtime is required for verification.</p>
-          )}
-          {worldAppMiniRuntime && !miniKitAvailable && (
-            <p className="config-warning">MiniKit verify is unavailable in this World App context. Update World App and retry.</p>
-          )}
           {worldIdSession ? (
             <p>
-              Session token active until {new Date(worldIdSession.expiresAt).toLocaleString()} ({worldIdSession.source}).
+              Session: ACTIVE / expires {new Date(worldIdSession.expiresAt).toLocaleString()}
             </p>
           ) : (
-            <p>No active World ID session for this wallet.</p>
+            <p>Session: NONE</p>
           )}
-          <details className="manual-world-proof">
-            <summary>World ID debug logs ({worldIdDebugLogs.length})</summary>
-            <div className="action-row">
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => setWorldIdDebugLogs([])}
-                disabled={worldIdDebugLogs.length === 0}
-              >
-                Clear Debug Logs
-              </button>
-            </div>
-            <textarea readOnly rows={10} value={worldIdDebugText || "No logs yet."} />
-          </details>
         </section>
 
         <section className="status-card">
-          <h2>Register / Update Node</h2>
-          <form onSubmit={onRegisterNode} className="form-grid compact-form">
-            <p className="config-warning">Node ID is auto-assigned as your wallet address.</p>
-            <label>
-              Stake Amount (token unit)
-              <input
-                value={nodeForm.stakeAmount}
-                onChange={(event) => setNodeForm((prev) => ({ ...prev, stakeAmount: event.target.value }))}
-                inputMode="numeric"
-                pattern="[0-9]+"
-                required
-              />
-            </label>
-            <fieldset className="family-picker">
-              <legend>LLM Family Participation (select 1~4)</legend>
-              <div className="family-grid">
-                {MODEL_FAMILIES.map((family) => (
-                  <label key={family} className="family-option">
-                    <input
-                      type="checkbox"
-                      checked={nodeForm.selectedModelFamilies.includes(family)}
-                      onChange={() => toggleModelFamily(family)}
-                    />
-                    <span>{family}</span>
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-            <label className="inline-check">
-              <input
-                type="checkbox"
-                checked={nodeForm.participationEnabled}
-                onChange={(event) => setNodeForm((prev) => ({ ...prev, participationEnabled: event.target.checked }))}
-              />
-              <span>Participate in auto-matching for new requests</span>
-            </label>
-            <p className="config-warning">
-              Model Name / Endpoint URL are auto-assigned by server mapping for this wallet.
-            </p>
-            <div className="action-row">
-              <button type="submit" disabled={!walletConnected || registeringNode || !thirdwebConfigured}>
-                {registeringNode ? "Signing / Activating..." : "Sign And Activate Node"}
-              </button>
+          <h2>Queue Overview</h2>
+          <div className="snapshot-grid">
+            <div className="snapshot-item">
+              <p className="snapshot-label">Total</p>
+              <p className="wallet-info mono">{queueSummary.total}</p>
             </div>
-          </form>
-          {myActiveNode ? (
-            <div>
-              <p>
-                <strong>My Active Node:</strong> {myActiveNode.nodeId} ({myActiveNode.selectedModelFamilies.join(", ")}
-                {" / "}
-                {myActiveNode.modelName}) | stake={myActiveNode.stakeAmount} |{" "}
-                {myActiveNode.participationEnabled ? "participating" : "paused"}
-              </p>
-              <p>
-                endpoint={myActiveNode.endpointUrl ?? "-"} | health={formatEndpointHealth(myActiveNode)}
-              </p>
-              <div className="action-row">
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={onSendHeartbeat}
-                  disabled={sendingHeartbeat || !walletConnected || !myActiveNode.endpointUrl}
-                >
-                  {sendingHeartbeat ? "Sending Heartbeat..." : "Send Signed Heartbeat"}
-                </button>
-              </div>
+            <div className="snapshot-item">
+              <p className="snapshot-label">Pending</p>
+              <p className="wallet-info mono">{queueSummary.pending}</p>
             </div>
-          ) : (
-            <p>No active node for this wallet yet.</p>
-          )}
-          {registrationMessage && <p>{registrationMessage}</p>}
+            <div className="snapshot-item">
+              <p className="snapshot-label">Running</p>
+              <p className="wallet-info mono">{queueSummary.running}</p>
+            </div>
+            <div className="snapshot-item">
+              <p className="snapshot-label">Finalized</p>
+              <p className="wallet-info mono">{queueSummary.finalized}</p>
+            </div>
+            <div className="snapshot-item">
+              <p className="snapshot-label">Rejected</p>
+              <p className="wallet-info mono">{queueSummary.rejected}</p>
+            </div>
+            <div className="snapshot-item">
+              <p className="snapshot-label">Failed</p>
+              <p className="wallet-info mono">{queueSummary.failed}</p>
+            </div>
+          </div>
         </section>
 
         <section className="status-card">
-          <h2>Queued Verification Flow</h2>
-          <p>Submit creates a queued request. Verify stage performs World ID + run-verification with conflict checks.</p>
-          <p>
-            Flow: <code>request submit - queue screening - verify/run - node match - consensus - on-chain finalize</code>
-          </p>
-        </section>
-
-        <section className="status-card">
-          <h2>Recent Requests</h2>
-          <p className="config-warning">Pending queue runs automatically in arrival order. Rejected requests show screening results.</p>
+          <h2>Requests</h2>
+          <p className="config-warning">Pending items are shown first (FIFO).</p>
           {loading ? (
             <p>Loading requests...</p>
-          ) : requests.length === 0 ? (
-            <p>No requests yet. Create one in the Request page.</p>
+          ) : sortedRequests.length === 0 ? (
+            <p>No requests yet. Create one from Request page.</p>
           ) : (
             <div className="request-table">
               <div className="request-head">
                 <span>Request</span>
                 <span>Status</span>
-                <span>Priority</span>
-                <span>Attempts</span>
+                <span>Queue</span>
+                <span>Vector</span>
                 <span>Updated</span>
                 <span>Action</span>
               </div>
               {sortedRequests.map((record) => {
-                const statusTone =
-                  record.status === "FINALIZED"
-                    ? "ok"
-                    : record.status === "REJECTED_DUPLICATE" || record.status === "REJECTED_CONFLICT"
-                      ? "bad"
-                      : record.status.startsWith("FAILED_")
-                        ? "bad"
-                        : "warn";
                 const ownedByConnectedWallet =
                   walletConnected &&
                   record.input.submitterAddress.trim().toLowerCase() === walletAddress.trim().toLowerCase();
@@ -1478,14 +833,15 @@ export default function VerifyPage() {
                         : runningRequestId !== null
                           ? "another run in progress"
                           : "ready";
+
                 return (
                   <div key={record.requestId} className="request-row">
                     <span className="mono small">{record.requestId}</span>
-                    <span className={`status-badge ${statusTone}`}>
-                      {record.status}
+                    <span className={`status-badge ${getStatusTone(record.status)}`}>{record.status}</span>
+                    <span className="small mono">{record.queueDecision?.decision ?? "-"}</span>
+                    <span className="small mono">
+                      {record.vectorSync ? `${record.vectorSync.state}/${record.vectorSync.vectorStatus}` : "-"}
                     </span>
-                    <span>{record.queuePriority ?? "-"}</span>
-                    <span>{record.runAttempts}/2</span>
                     <span>{new Date(record.updatedAt).toLocaleString()}</span>
                     <span className="inline-row">
                       <Link className="text-link" to={`/result/${encodeURIComponent(record.requestId)}`}>
@@ -1512,41 +868,7 @@ export default function VerifyPage() {
           )}
         </section>
 
-        <section className="status-card">
-          <h2>Active Nodes</h2>
-          <p className="config-warning">
-            This list is reconstructed from on-chain node lifecycle events (activation/heartbeat).
-          </p>
-          {nodes.length === 0 ? (
-            <p>No registered nodes. Register and activate at least 3 healthy endpoint-backed nodes.</p>
-          ) : (
-            <div className="request-table">
-              <div className="request-head">
-                <span>Node ID</span>
-                <span>Models / Stake</span>
-                <span>Endpoint</span>
-                <span>Health</span>
-                <span>Wallet</span>
-                <span>Updated</span>
-              </div>
-              {nodes.map((node) => (
-                <div key={node.registrationId} className="request-row">
-                  <span className="mono small">{node.nodeId}</span>
-                  <span>
-                    {node.selectedModelFamilies.join(", ")} / stake={node.stakeAmount}
-                  </span>
-                  <span className="mono small">{node.endpointUrl ?? "-"}</span>
-                  <span className={`status-badge ${node.endpointStatus === "HEALTHY" ? "ok" : "warn"}`}>
-                    {node.endpointStatus}
-                  </span>
-                  <span className="mono small">{node.walletAddress}</span>
-                  <span>{new Date(node.updatedAt).toLocaleString()}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-
+        {notice && <p>{notice}</p>}
         {error && <p className="error-text">{error}</p>}
       </main>
     </div>

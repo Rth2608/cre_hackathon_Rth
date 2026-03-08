@@ -2,8 +2,6 @@ import { signMessage } from "thirdweb/utils";
 import type { Account } from "thirdweb/wallets";
 import { MiniKit } from "@worldcoin/minikit-js";
 
-export type NodeId = string;
-
 export interface MarketRequestInput {
   question: string;
   description: string;
@@ -61,108 +59,17 @@ export interface RequestRecord {
     idempotencyReused?: boolean;
     submissionAttempts?: number;
   };
-  activeNodes?: RegisteredNode[];
-  paymentReceipt?: VerificationPaymentReceipt;
-  workflowStepLogs?: WorkflowStepLog[];
+  paymentReceipt?: {
+    x402Enabled: boolean;
+    required: boolean;
+    paid: boolean;
+    payerAddress: string;
+    resource: string;
+    price: string;
+    paymentRef: string;
+    settledAt: string;
+  };
   lastError?: string;
-}
-
-export interface WorkflowStepLog {
-  step:
-    | "validate_input"
-    | "dispatch_nodes"
-    | "collect_reports"
-    | "compute_consensus"
-    | "persist_offchain_report"
-    | "submit_onchain"
-    | "emit_run_summary";
-  status: "ok" | "failed" | "skipped";
-  startedAt: string;
-  endedAt: string;
-  detail?: string;
-}
-
-export interface VerificationPaymentReceipt {
-  x402Enabled: boolean;
-  required: boolean;
-  paid: boolean;
-  payerAddress: string;
-  resource: string;
-  price: string;
-  paymentRef: string;
-  settledAt: string;
-}
-
-export interface RegisteredNode {
-  registrationId: string;
-  walletAddress: string;
-  nodeId: string;
-  selectedModelFamilies: Array<"gpt" | "gemini" | "claude" | "grok">;
-  modelName: string;
-  endpointUrl?: string;
-  peerId?: string;
-  tlsCertFingerprint?: string;
-  endpointStatus: "UNKNOWN" | "HEALTHY" | "UNHEALTHY";
-  endpointLastCheckedAt?: string;
-  endpointLastHeartbeatAt?: string;
-  endpointLatencyMs?: number;
-  endpointFailureCount: number;
-  endpointLastError?: string;
-  endpointVerifiedAt?: string;
-  stakeAmount: string;
-  participationEnabled: boolean;
-  worldIdVerified: boolean;
-  status: "ACTIVE" | "INACTIVE";
-  registeredAt: string;
-  updatedAt: string;
-}
-
-export interface NodeRegistrationChallenge {
-  challengeId: string;
-  walletAddress: string;
-  nodeId: string;
-  selectedModelFamilies: Array<"gpt" | "gemini" | "claude" | "grok">;
-  modelName: string;
-  endpointUrl: string;
-  peerId?: string;
-  tlsCertFingerprint?: string;
-  stakeAmount: string;
-  participationEnabled: boolean;
-  worldIdVerified: boolean;
-  challengeMessage: string;
-  nonce: string;
-  createdAt: string;
-  expiresAt: string;
-  status: "PENDING" | "USED" | "EXPIRED";
-  signature?: string;
-  usedAt?: string;
-}
-
-export interface NodeEndpointProbe {
-  ok: boolean;
-  checkedAt: string;
-  latencyMs?: number;
-  error?: string;
-}
-
-export interface PorProofSnapshot {
-  marketId: number;
-  epoch: number;
-  assetsMicroUsdc: string;
-  liabilitiesMicroUsdc: string;
-  coverageBps: number;
-  healthy: boolean;
-  proofHash: string;
-  proofUri?: string;
-  txHash?: string;
-  updatedAt: string;
-}
-
-export interface PorStatus {
-  mode: "FILE" | "ONCHAIN";
-  source: string;
-  latest: PorProofSnapshot;
-  history: PorProofSnapshot[];
 }
 
 export interface WorldIdProofInput {
@@ -179,7 +86,6 @@ export interface WorldIdProofInput {
   action?: string;
   nullifier_hash?: string;
   verification_level?: string;
-  // Keep forward compatibility with additional World ID 4.0 fields.
   [key: string]: unknown;
 }
 
@@ -195,14 +101,6 @@ export interface WorldIdSession {
   issuedAt: string;
   expiresAt: string;
   source: "world_id_cloud";
-}
-
-export interface WorldIdRpContext {
-  rp_id: string;
-  nonce: string;
-  created_at: number;
-  expires_at: number;
-  signature: string;
 }
 
 interface ApiEnvelope<T> {
@@ -312,6 +210,7 @@ function resolveAuthWalletAddress(walletAddress: string, account?: Account): str
       return miniWallet;
     }
   }
+
   const accountWallet =
     typeof (account as { address?: unknown } | undefined)?.address === "string"
       ? ((account as { address?: string }).address ?? "")
@@ -320,6 +219,7 @@ function resolveAuthWalletAddress(walletAddress: string, account?: Account): str
   if (normalizedAccountWallet) {
     return normalizedAccountWallet;
   }
+
   return extractEvmAddress(walletAddress) ?? toLowerAddress(walletAddress);
 }
 
@@ -400,6 +300,7 @@ async function walletAuthWithMiniKit(input: {
     const detail = payload && typeof payload.error_code === "string" ? payload.error_code : "unknown";
     throw new Error(`minikit_wallet_auth_failed: ${detail}`);
   }
+
   const message = typeof payload.message === "string" ? payload.message : "";
   const signatureRaw = typeof payload.signature === "string" ? payload.signature : "";
   const signature = normalizeHexSignature(signatureRaw);
@@ -409,6 +310,7 @@ async function walletAuthWithMiniKit(input: {
   if (!signature) {
     throw new Error("minikit_wallet_auth_failed: empty_signature");
   }
+
   return {
     message,
     signature,
@@ -464,6 +366,7 @@ async function buildWalletAuthHeaders(input: {
     path: input.path,
     timestamp
   });
+
   const signWithMiniKitAndAlign = async (): Promise<string> => {
     const fallback = await signWithMiniKitFallback({ message });
     if (fallback.signerAddress && fallback.signerAddress !== effectiveWalletAddress) {
@@ -479,6 +382,7 @@ async function buildWalletAuthHeaders(input: {
     }
     return fallback.signature;
   };
+
   let signature: string;
   try {
     signature = await signMessage({
@@ -525,6 +429,7 @@ async function requestJson<T>(path: string, options?: RequestInit): Promise<T> {
   if (hasBody && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
+
   const timeoutController = new AbortController();
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
   const externalSignal = options?.signal;
@@ -536,9 +441,11 @@ async function requestJson<T>(path: string, options?: RequestInit): Promise<T> {
       externalSignal.addEventListener("abort", forwardAbort, { once: true });
     }
   }
+
   timeoutId = setTimeout(() => {
     timeoutController.abort();
   }, API_TIMEOUT_MS);
+
   let response: Response;
   try {
     response = await fetch(requestUrl, {
@@ -614,16 +521,8 @@ export interface RunVerificationResult extends RequestRecord {
   traceId?: string;
   workflow?: {
     traceId?: string;
-    stepLogs?: WorkflowStepLog[];
     [key: string]: unknown;
   };
-}
-
-export async function createRequest(input: MarketRequestInput): Promise<RequestRecord> {
-  return requestJson<RequestRecord>("/api/requests", {
-    method: "POST",
-    body: JSON.stringify(input)
-  });
 }
 
 export async function createRequestForWallet(
@@ -635,6 +534,7 @@ export async function createRequestForWallet(
   if (!account) {
     throw new Error("wallet_account_required");
   }
+
   const authWalletAddress = resolveAuthWalletAddress(walletAddress, account);
   const auth = await buildWalletAuthHeaders({
     account,
@@ -642,10 +542,12 @@ export async function createRequestForWallet(
     method: "POST",
     path: "/api/requests"
   });
+
   const requestInput: MarketRequestInput = {
     ...input,
     submitterAddress: auth.walletAddress
   };
+
   return requestJson<RequestRecord>("/api/requests", {
     method: "POST",
     headers: appendWorldIdTokenHeader(
@@ -667,28 +569,6 @@ export async function getRequest(requestId: string): Promise<RequestRecord> {
   return requestJson<RequestRecord>(`/api/requests/${encodeURIComponent(requestId)}`);
 }
 
-export async function runVerification(requestId: string): Promise<RequestRecord> {
-  const data = await requestJson<{
-    requestId: string;
-    status: RequestRecord["status"];
-    queuePriority?: number;
-    queueDecision?: RequestRecord["queueDecision"];
-    runAttempts: number;
-    createdAt: string;
-    updatedAt: string;
-    input: MarketRequestInput;
-    consensus?: RequestRecord["consensus"];
-    onchainReceipt?: RequestRecord["onchainReceipt"];
-    activeNodes?: RequestRecord["activeNodes"];
-    paymentReceipt?: RequestRecord["paymentReceipt"];
-    lastError?: string;
-  }>(`/api/requests/${encodeURIComponent(requestId)}/run-verification`, {
-    method: "POST"
-  });
-
-  return data;
-}
-
 export async function runVerificationForWallet(
   requestId: string,
   walletAddress: string,
@@ -698,6 +578,7 @@ export async function runVerificationForWallet(
   if (!account) {
     throw new Error("wallet_account_required");
   }
+
   const authWalletAddress = resolveAuthWalletAddress(walletAddress, account);
   const path = `/api/requests/${encodeURIComponent(requestId)}/run-verification`;
   const auth = await buildWalletAuthHeaders({
@@ -706,7 +587,8 @@ export async function runVerificationForWallet(
     method: "POST",
     path
   });
-  const data = await requestJson<RunVerificationResult>(path, {
+
+  return requestJson<RunVerificationResult>(path, {
     method: "POST",
     headers: appendWorldIdTokenHeader(
       {
@@ -716,116 +598,6 @@ export async function runVerificationForWallet(
       worldIdToken
     )
   });
-
-  return data;
-}
-
-export async function getReport(requestId: string): Promise<{
-  requestId: string;
-  nodeReports: Array<{
-    nodeId: NodeId;
-    verdict: "PASS" | "FAIL";
-    confidence: number;
-    rationale: string;
-    evidenceSummary: string;
-    reportHash: string;
-    generatedAt: string;
-  }>;
-  consensus?: RequestRecord["consensus"];
-  onchainReceipt?: RequestRecord["onchainReceipt"];
-  nodeFailures?: Array<{ nodeId: string; reason: string }>;
-  generatedAt: string;
-}> {
-  return requestJson(`/api/requests/${encodeURIComponent(requestId)}/report`);
-}
-
-export async function getPorStatus(): Promise<PorStatus> {
-  return requestJson<PorStatus>("/api/por/status");
-}
-
-export async function listNodes(): Promise<RegisteredNode[]> {
-  return requestJson<RegisteredNode[]>("/api/nodes");
-}
-
-export async function registerNode(input: {
-  walletAddress: string;
-  selectedModelFamilies: Array<"gpt" | "gemini" | "claude" | "grok">;
-  modelName: string;
-  endpointUrl?: string;
-  stakeAmount?: string;
-  participationEnabled?: boolean;
-  worldIdToken?: string;
-  account?: Account;
-}): Promise<{ node: RegisteredNode; paymentReceipt: VerificationPaymentReceipt }> {
-  const account = input.account;
-  if (!account) {
-    throw new Error("wallet_account_required");
-  }
-  const authWalletAddress = resolveAuthWalletAddress(input.walletAddress, account);
-  const auth = await buildWalletAuthHeaders({
-    account,
-    walletAddress: authWalletAddress,
-    method: "POST",
-    path: "/api/nodes/register"
-  });
-  const requestInput = {
-    ...input,
-    walletAddress: auth.walletAddress
-  };
-  return requestJson<{ node: RegisteredNode; paymentReceipt: VerificationPaymentReceipt }>("/api/nodes/register", {
-    method: "POST",
-    headers: appendWorldIdTokenHeader(
-      {
-        ...auth.headers,
-        "payment-signature": auth.headers[WALLET_AUTH_SIGNATURE_HEADER] ?? ""
-      },
-      requestInput.worldIdToken
-    ),
-    body: JSON.stringify(requestInput)
-  });
-}
-
-export async function requestNodeChallenge(input: {
-  walletAddress: string;
-  selectedModelFamilies: Array<"gpt" | "gemini" | "claude" | "grok">;
-  modelName?: string;
-  endpointUrl?: string;
-  peerId?: string;
-  tlsCertFingerprint?: string;
-  stakeAmount?: string;
-  participationEnabled?: boolean;
-  worldIdToken?: string;
-  account?: Account;
-}): Promise<{ challenge: NodeRegistrationChallenge; paymentReceipt: VerificationPaymentReceipt }> {
-  const account = input.account;
-  if (!account) {
-    throw new Error("wallet_account_required");
-  }
-  const authWalletAddress = resolveAuthWalletAddress(input.walletAddress, account);
-  const auth = await buildWalletAuthHeaders({
-    account,
-    walletAddress: authWalletAddress,
-    method: "POST",
-    path: "/api/nodes/challenge"
-  });
-  const requestInput = {
-    ...input,
-    walletAddress: auth.walletAddress
-  };
-  return requestJson<{ challenge: NodeRegistrationChallenge; paymentReceipt: VerificationPaymentReceipt }>(
-    "/api/nodes/challenge",
-    {
-      method: "POST",
-      headers: appendWorldIdTokenHeader(
-        {
-          ...auth.headers,
-          "payment-signature": auth.headers[WALLET_AUTH_SIGNATURE_HEADER] ?? ""
-        },
-        requestInput.worldIdToken
-      ),
-      body: JSON.stringify(requestInput)
-    }
-  );
 }
 
 export async function verifyWorldIdForWallet(input: {
@@ -839,6 +611,7 @@ export async function verifyWorldIdForWallet(input: {
   if (!input.account) {
     throw new Error("wallet_account_required");
   }
+
   const authWalletAddress = resolveAuthWalletAddress(input.walletAddress, input.account);
   const auth = await buildWalletAuthHeaders({
     account: input.account,
@@ -846,6 +619,7 @@ export async function verifyWorldIdForWallet(input: {
     method: "POST",
     path: "/api/world-id/verify"
   });
+
   return requestJson<{ session: WorldIdSession }>("/api/world-id/verify", {
     method: "POST",
     headers: auth.headers,
@@ -857,107 +631,4 @@ export async function verifyWorldIdForWallet(input: {
       clientSource: input.clientSource
     })
   });
-}
-
-export async function issueWorldIdRpContextForWallet(input: {
-  walletAddress: string;
-  account?: Account;
-}): Promise<{ rpContext: WorldIdRpContext }> {
-  if (!input.account) {
-    throw new Error("wallet_account_required");
-  }
-  const authWalletAddress = resolveAuthWalletAddress(input.walletAddress, input.account);
-  const auth = await buildWalletAuthHeaders({
-    account: input.account,
-    walletAddress: authWalletAddress,
-    method: "POST",
-    path: "/api/world-id/rp-context"
-  });
-  return requestJson<{ rpContext: WorldIdRpContext }>("/api/world-id/rp-context", {
-    method: "POST",
-    headers: auth.headers,
-    body: JSON.stringify({
-      walletAddress: auth.walletAddress
-    })
-  });
-}
-
-export async function activateNodeChallenge(input: {
-  challengeId: string;
-  walletAddress: string;
-  signature: string;
-  account?: Account;
-}): Promise<{
-  node: RegisteredNode;
-  challenge: NodeRegistrationChallenge;
-  endpointProbe: NodeEndpointProbe;
-  lifecycleOnchainReceipt?: RequestRecord["onchainReceipt"];
-}> {
-  const account = input.account;
-  if (!account) {
-    throw new Error("wallet_account_required");
-  }
-  const authWalletAddress = resolveAuthWalletAddress(input.walletAddress, account);
-  const auth = await buildWalletAuthHeaders({
-    account,
-    walletAddress: authWalletAddress,
-    method: "POST",
-    path: "/api/nodes/activate"
-  });
-  const requestInput = {
-    ...input,
-    walletAddress: auth.walletAddress
-  };
-  return requestJson<{
-    node: RegisteredNode;
-    challenge: NodeRegistrationChallenge;
-    endpointProbe: NodeEndpointProbe;
-    lifecycleOnchainReceipt?: RequestRecord["onchainReceipt"];
-  }>("/api/nodes/activate", {
-    method: "POST",
-    headers: auth.headers,
-    body: JSON.stringify(requestInput)
-  });
-}
-
-export async function sendNodeHeartbeat(input: {
-  walletAddress: string;
-  endpointUrl: string;
-  timestamp: number;
-  signature: string;
-  account?: Account;
-}): Promise<{
-  node: RegisteredNode;
-  endpointProbe?: NodeEndpointProbe;
-  heartbeatMessage: string;
-  lifecycleOnchainReceipt?: RequestRecord["onchainReceipt"];
-}> {
-  const account = input.account;
-  if (!account) {
-    throw new Error("wallet_account_required");
-  }
-  const authWalletAddress = resolveAuthWalletAddress(input.walletAddress, account);
-  const auth = await buildWalletAuthHeaders({
-    account,
-    walletAddress: authWalletAddress,
-    method: "POST",
-    path: "/api/nodes/heartbeat"
-  });
-  const requestInput = {
-    ...input,
-    walletAddress: auth.walletAddress
-  };
-  return requestJson<{
-    node: RegisteredNode;
-    endpointProbe?: NodeEndpointProbe;
-    heartbeatMessage: string;
-    lifecycleOnchainReceipt?: RequestRecord["onchainReceipt"];
-  }>(
-    "/api/nodes/heartbeat",
-    {
-      method: "POST",
-      headers: auth.headers,
-      body: JSON.stringify(requestInput)
-    }
-  );
 }

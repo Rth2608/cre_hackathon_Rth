@@ -1,7 +1,7 @@
 import { Link } from "react-router-dom";
 
 interface AppNavProps {
-  current: "submit" | "verify" | "result" | "por";
+  current: "submit" | "verify" | "result";
 }
 
 export default function AppNav({ current }: AppNavProps) {

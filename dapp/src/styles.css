@@ -252,10 +252,6 @@ body::before {
   gap: 0.95rem;
 }
 
-.compact-form {
-  margin-top: 0;
-}
-
 label {
   display: grid;
   gap: 0.36rem;
@@ -364,10 +360,6 @@ button:disabled {
   width: 100%;
 }
 
-.inline-row.between {
-  justify-content: space-between;
-}
-
 .status-card {
   margin-top: 1rem;
   border-radius: 16px;
@@ -417,117 +409,6 @@ button:disabled {
   text-transform: uppercase;
 }
 
-.snapshot-copy-btn {
-  margin-top: 0.35rem;
-}
-
-.snapshot-capabilities {
-  margin-top: 0.72rem;
-  border-top: 1px solid rgba(83, 121, 165, 0.28);
-  padding-top: 0.62rem;
-}
-
-.snapshot-capability-list {
-  display: grid;
-  gap: 0.45rem;
-}
-
-.snapshot-capability {
-  margin: 0;
-  border: 1px solid rgba(83, 121, 165, 0.42);
-  border-radius: 10px;
-  padding: 0.46rem 0.55rem;
-  background: rgba(13, 24, 42, 0.82);
-  font-size: 0.78rem;
-  color: #b9d4f3;
-}
-
-.snapshot-capability.ok {
-  color: #6cf8d6;
-  border-color: rgba(57, 227, 165, 0.44);
-  background: rgba(27, 110, 79, 0.14);
-}
-
-.snapshot-capability.warn {
-  color: #ffbf86;
-  border-color: rgba(255, 184, 116, 0.4);
-  background: rgba(125, 72, 26, 0.2);
-}
-
-.token-balance-list {
-  display: grid;
-  gap: 0.2rem;
-}
-
-.family-picker {
-  margin: 0;
-  border: 1px solid rgba(83, 121, 165, 0.46);
-  border-radius: 12px;
-  padding: 0.62rem 0.72rem 0.74rem;
-  background: rgba(8, 15, 29, 0.6);
-}
-
-.family-picker legend {
-  padding: 0 0.4rem;
-  color: #bad0ea;
-  font-size: 0.8rem;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-}
-
-.family-grid {
-  display: grid;
-  gap: 0.52rem;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.family-option {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.45rem;
-  border: 1px solid rgba(74, 111, 155, 0.4);
-  border-radius: 10px;
-  padding: 0.5rem 0.55rem;
-  background: rgba(13, 23, 41, 0.8);
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
-
-.family-option span {
-  font-size: 0.8rem;
-}
-
-.inline-check {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.55rem;
-  font-size: 0.85rem;
-  color: #bad0ea;
-}
-
-.manual-world-proof {
-  margin-top: 0.45rem;
-  border: 1px solid rgba(74, 111, 155, 0.34);
-  border-radius: 12px;
-  background: rgba(12, 21, 37, 0.7);
-  padding: 0.62rem 0.68rem;
-}
-
-.manual-world-proof summary {
-  cursor: pointer;
-  color: #9ec1ea;
-  font-weight: 700;
-  font-size: 0.82rem;
-}
-
-.manual-world-proof[open] summary {
-  margin-bottom: 0.55rem;
-}
-
-.status-card.muted {
-  background: linear-gradient(180deg, rgba(20, 29, 47, 0.86), rgba(12, 18, 33, 0.95));
-}
-
 .status-badge {
   display: inline-flex;
   align-items: center;
@@ -567,21 +448,6 @@ button:disabled {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.kpi-grid {
-  margin-top: 1rem;
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 1rem;
-}
-
-.kpi-value {
-  margin: 0.2rem 0 0.25rem;
-  color: #eff8ff !important;
-  font-size: clamp(1.2rem, 2.4vw, 1.7rem);
-  font-weight: 700;
-  line-height: 1.08;
-}
-
 .request-table {
   margin-top: 0.56rem;
   display: grid;
@@ -615,69 +481,6 @@ button:disabled {
   min-width: 0;
   overflow-wrap: anywhere;
   word-break: break-word;
-}
-
-.por-head,
-.por-row {
-  grid-template-columns: 0.6fr 0.9fr 1.1fr 1.1fr 2.4fr;
-}
-
-.report-list {
-  margin-top: 0.66rem;
-  display: grid;
-  gap: 0.68rem;
-}
-
-.workflow-step-list {
-  margin-top: 0.66rem;
-  display: grid;
-  gap: 0.56rem;
-}
-
-.workflow-step-item {
-  border-radius: 12px;
-  border: 1px solid rgba(75, 116, 165, 0.34);
-  background: rgba(13, 23, 41, 0.72);
-  padding: 0.72rem;
-}
-
-.workflow-step-item h3 {
-  margin: 0;
-  font-size: 0.92rem;
-}
-
-.report-item {
-  border-radius: 14px;
-  border: 1px solid rgba(75, 116, 165, 0.36);
-  background: linear-gradient(180deg, rgba(16, 28, 48, 0.92), rgba(9, 17, 32, 0.95));
-  padding: 0.82rem;
-}
-
-.report-item h3 {
-  margin: 0;
-}
-
-.pill {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 1.3rem;
-  border-radius: 999px;
-  padding: 0 0.5rem;
-  font-size: 0.67rem;
-  font-weight: 800;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.pill.pass {
-  color: #57f3ca;
-  background: rgba(23, 200, 148, 0.17);
-}
-
-.pill.fail {
-  color: #ff90a4;
-  background: rgba(245, 91, 123, 0.18);
 }
 
 .text-link {
@@ -717,16 +520,11 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
-  .kpi-grid {
-    grid-template-columns: 1fr;
-  }
-
   .request-head {
     display: none;
   }
 
-  .request-row,
-  .por-row {
+  .request-row {
     grid-template-columns: 1fr;
     gap: 0.4rem;
   }
@@ -738,10 +536,6 @@ button:disabled {
   .chip {
     height: 1.56rem;
     font-size: 0.65rem;
-  }
-
-  .family-grid {
-    grid-template-columns: 1fr;
   }
 
   .wallet-row .wallet-info {

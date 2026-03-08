@@ -12,7 +12,7 @@ End-to-end demo for multi-DON style verification:
 
 - `contracts/`: Solidity registry + Foundry deploy/test files
 - `orchestrator/`: API server + CRE workflow runner + consensus engine
-- `dapp/`: React UI for submit/result pages
+- `dapp/`: React UI (Mini App-first) for request submit/verify/result
 - `cre-operator-verifier/`: operator-managed CRE workflow scaffold (HTTP trigger + Confidential HTTP + Vault secret)
 
 ## Prerequisites
@@ -68,7 +68,7 @@ Server default: `http://localhost:8787`
 ```bash
 cd dapp
 cp .env.example .env
-# set VITE_THIRDWEB_CLIENT_ID, VITE_WORLD_ID_APP_ID, VITE_WORLD_ID_ACTION in .env
+# set VITE_THIRDWEB_CLIENT_ID, VITE_WORLD_ID_MINI_APP_ID, VITE_WORLD_ID_MINI_ACTION in .env
 bun install
 bun run dev
 ```
@@ -77,10 +77,9 @@ dApp default: `http://localhost:5173`
 
 Pages:
 
-- `/` request submission (auto verification trigger)
-- `/verify` verifier node registration/stake/participation settings
+- `/` request submission (World ID verify + queue)
+- `/verify` World ID session check + queued request run dashboard
 - `/result/:requestId` verification result view
-- `/por` PoR dashboard
 
 Notes:
 
@@ -96,8 +95,9 @@ Use this when you want a stable HTTPS URL for World Mini App while keeping orche
 1. Prepare frontend env for production:
    - `VITE_API_BASE_URL=https://<public-orchestrator-url>`
    - `VITE_THIRDWEB_CLIENT_ID=<thirdweb client id>`
-   - `VITE_WORLD_ID_APP_ID=<world app id>`
-   - `VITE_WORLD_ID_ACTION=<world action>`
+   - `VITE_WORLD_ID_MINI_APP_ID=<world mini app id>`
+   - `VITE_WORLD_ID_MINI_ACTION=<world action>`
+   - optional fallback compatibility: `VITE_WORLD_ID_APP_ID`, `VITE_WORLD_ID_ACTION`
 2. Import repo into Vercel and set **Root Directory** to `dapp`.
 3. Keep framework as Vite default. Build command remains `vite build`.
 4. SPA routes are handled via `dapp/vercel.json` rewrite to `index.html`.
@@ -246,10 +246,8 @@ Behavior notes:
   - `ASSUME_WORLD_ID_VERIFIED=false` (recommended): `/api/world-id/verify` must succeed first.
   - server returns a session token, and node registration/challenge must include `x-world-id-token`.
   - `ASSUME_WORLD_ID_VERIFIED=true` keeps a demo bypass path.
-  - Verify page supports both:
+  - dApp UI currently supports Mini App flow only:
     - `Verify in World Mini App` (MiniKit, inside World App)
-    - `Verify with External Widget` (IDKit, regular browser)
-    - manual proof JSON input as simulator fallback
 - x402 gate is enabled with `X402_ENABLED=true`.
   - `POST /api/requests` requires payment header and auto-runs verification.
   - `POST /api/nodes/register` requires payment header
@@ -443,7 +441,7 @@ The orchestrator reads chain settings from `orchestrator/.env`:
 - `ONCHAIN_READ_STRICT` (default `true`, fail API read if chain query fails instead of fallback local DB)
 - `ONCHAIN_LOG_FROM_BLOCK` (optional, default `0`, set start block for event scans)
 - `ONCHAIN_MAX_REQUESTS` (optional, default `100`, max request rows returned from on-chain events)
-- `POR_ONCHAIN_READ_ENABLED` (default `true`, read PoR dashboard from `PorProofRecorded` on-chain events)
+- `POR_ONCHAIN_READ_ENABLED` (default `true`, read `/api/por/status` from `PorProofRecorded` on-chain events)
 - `POR_ONCHAIN_READ_STRICT` (default `false`, fail `/api/por/status` if on-chain query fails)
 - `POR_ONCHAIN_AUTO_RECORD_ENABLED` (default `true`, auto-record PoR snapshot after finalized verification)
 - `POR_ONCHAIN_AUTO_RECORD_STRICT` (default `false`, fail request flow if PoR auto-record tx fails)
@@ -458,7 +456,7 @@ If `USE_MOCK_ONCHAIN=true`, orchestrator returns a deterministic mock receipt in
 
 ## PoR on-chain flow (updated)
 
-- The dashboard (`/por`) now reads PoR snapshots from on-chain `PorProofRecorded` events when enabled.
+- The API (`/api/por/status`) reads PoR snapshots from on-chain `PorProofRecorded` events when enabled.
 - If no on-chain PoR event exists yet, API falls back to file/env mock values.
 - After each successful verification finalization, orchestrator auto-submits one PoR proof epoch:
   - first epoch uses `POR_*` base values,

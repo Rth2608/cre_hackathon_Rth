@@ -4,8 +4,6 @@ const defaultWorldIdAppId = (import.meta.env.VITE_WORLD_ID_APP_ID || "").trim();
 const defaultWorldIdAction = (import.meta.env.VITE_WORLD_ID_ACTION || "").trim();
 const miniWorldIdAppId = (import.meta.env.VITE_WORLD_ID_MINI_APP_ID || defaultWorldIdAppId).trim();
 const miniWorldIdAction = (import.meta.env.VITE_WORLD_ID_MINI_ACTION || defaultWorldIdAction).trim();
-const externalWorldIdAppId = (import.meta.env.VITE_WORLD_ID_EXTERNAL_APP_ID || defaultWorldIdAppId).trim();
-const externalWorldIdAction = (import.meta.env.VITE_WORLD_ID_EXTERNAL_ACTION || defaultWorldIdAction).trim();
 
 export interface WorldIdClientConfig {
   appId: string;
@@ -15,7 +13,6 @@ export interface WorldIdClientConfig {
 
 export interface WorldIdConfig {
   mini: WorldIdClientConfig;
-  external: WorldIdClientConfig;
 }
 
 function buildClientConfig(appId: string, action: string): WorldIdClientConfig {
@@ -27,8 +24,7 @@ function buildClientConfig(appId: string, action: string): WorldIdClientConfig {
 }
 
 const worldIdConfig: WorldIdConfig = {
-  mini: buildClientConfig(miniWorldIdAppId, miniWorldIdAction),
-  external: buildClientConfig(externalWorldIdAppId, externalWorldIdAction)
+  mini: buildClientConfig(miniWorldIdAppId, miniWorldIdAction)
 };
 
 function buildSessionStorageKey(walletAddress: string): string {
