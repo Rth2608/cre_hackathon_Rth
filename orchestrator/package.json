@@ -8,6 +8,7 @@
     "dev:with-vector": "bash ./scripts/start_with_vector.sh",
     "node-worker": "bun run src/nodeWorker.ts",
     "cre-verifier-adapter": "bun run src/creVerifierAdapter.ts",
+    "llm-verifier-service": "bun run src/llmVerifierService.ts",
     "vector-screening-service": "bun run src/vectorScreeningService.ts",
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit"
