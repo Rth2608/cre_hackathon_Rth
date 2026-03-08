@@ -1883,6 +1883,11 @@ function assertStartupConfigOrThrow(): void {
   if (!runtimeGuard.ok) {
     issues.push(runtimeGuard.reason);
   }
+  const requestAutoVerifyEnabled = resolveRequestAutoVerifyEnabled();
+  const requestManualRunEnabled = resolveRequestManualRunEnabled();
+  if (!requestAutoVerifyEnabled && !requestManualRunEnabled) {
+    issues.push("REQUEST_AUTO_VERIFY_ENABLED or REQUEST_MANUAL_RUN_ENABLED must be true");
+  }
 
   const signedReportsEnabled = parseBooleanEnv(process.env.USE_DON_SIGNED_REPORTS, false);
   if (signedReportsEnabled || distributedDonMode) {
@@ -1906,7 +1911,9 @@ function assertStartupConfigOrThrow(): void {
     signedReportsEnabled,
     requireRegisteredNodes,
     requireEndpointUrl,
-    requireHealthyEndpoint
+    requireHealthyEndpoint,
+    requestAutoVerifyEnabled,
+    requestManualRunEnabled
   });
 }
 
@@ -2955,6 +2962,7 @@ async function handleRegisterNode(req: Request): Promise<Response> {
       participationEnabled: body.participationEnabled,
       worldIdVerified: true
     });
+    scheduleRequestQueueProcessor("node_registered");
 
     return jsonResponse(
       {
@@ -3169,6 +3177,7 @@ async function handleActivateNodeChallenge(req: Request): Promise<Response> {
       walletAddress: body.walletAddress,
       signature: body.signature
     });
+    scheduleRequestQueueProcessor("node_activated");
 
     const lifecycleOnchainReceipt =
       resolveNodeLifecycleOnchainEnabled() && result.node.endpointUrl
@@ -3288,6 +3297,7 @@ async function handleNodeHeartbeat(req: Request): Promise<Response> {
       walletAddress: normalizedWallet,
       endpointUrl
     });
+    scheduleRequestQueueProcessor("node_heartbeat");
 
     const lifecycleOnchainReceipt =
       resolveNodeLifecycleOnchainEnabled() && result.node.endpointUrl
