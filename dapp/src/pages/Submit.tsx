@@ -28,7 +28,7 @@ import {
 import { formatKnownMiniKitMessage } from "../lib/miniKitErrors";
 import { isThirdwebClientConfigured, thirdwebClient } from "../lib/thirdweb";
 import { clearWorldIdSession, getWorldIdConfig, loadWorldIdSession } from "../lib/worldId";
-import { getWorldAppRuntimeMode } from "../lib/worldAppRuntime";
+import { getWorldAppRuntimeMode, isWorldIdSimulatorContext } from "../lib/worldAppRuntime";
 import {
   fetchWorldChainVirtualBalances,
   getWorldChainVirtualConfig,
@@ -535,8 +535,10 @@ export default function SubmitPage() {
   const miniWorldIdConfigured = worldIdConfig.mini.configured;
   const externalWorldIdConfigured = worldIdConfig.external.configured;
   const worldChainVirtualConfig = getWorldChainVirtualConfig();
+  const worldIdSimulatorContext = isWorldIdSimulatorContext();
   const worldAppMiniRuntimeDetected = getWorldAppRuntimeMode() === "miniapp";
-  const worldAppMiniRuntime = worldAppMiniRuntimeDetected && !forceExternalWorldId;
+  const worldAppMiniRuntime = worldAppMiniRuntimeDetected && !forceExternalWorldId && !worldIdSimulatorContext;
+  const effectiveExternalWorldIdEnvironment = worldIdSimulatorContext ? "staging" : externalWorldIdEnvironment;
   const worldIdConfigured = worldAppMiniRuntime ? miniWorldIdConfigured : externalWorldIdConfigured;
 
   const [form, setForm] = useState(defaultForm);
@@ -971,8 +973,13 @@ export default function SubmitPage() {
           <p className="config-warning runtime-note">
             {worldAppMiniRuntime
               ? "In World App: Submit triggers in-app World ID verification before queueing."
-              : "In Web: Submit opens external World ID widget (simulator-compatible) before queueing."}
+              : `In Web: Submit opens external World ID widget (${effectiveExternalWorldIdEnvironment}) before queueing.`}
           </p>
+          {worldIdSimulatorContext && (
+            <p className="config-warning runtime-note">
+              World ID simulator context detected. External widget mode and <code>staging</code> are forced.
+            </p>
+          )}
           {forceExternalWorldId && worldAppMiniRuntimeDetected && (
             <p className="config-warning runtime-note">
               External mode is forced by <code>VITE_WORLD_ID_FORCE_EXTERNAL</code>. MiniKit path is bypassed.
@@ -1114,7 +1121,7 @@ export default function SubmitPage() {
             rp_context={externalRpContext}
             preset={deviceLegacy({ signal: worldIdSignal })}
             allow_legacy_proofs
-            environment={externalWorldIdEnvironment}
+            environment={effectiveExternalWorldIdEnvironment}
             autoClose
             onSuccess={onExternalWorldIdSuccess}
             onError={onExternalWorldIdError}
