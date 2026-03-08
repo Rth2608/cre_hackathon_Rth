@@ -9,31 +9,21 @@ import {
   type VerifyCommandPayload,
   VerificationLevel as MiniKitVerificationLevel
 } from "@worldcoin/minikit-js";
-import {
-  IDKitRequestWidget,
-  deviceLegacy,
-  type IDKitErrorCodes as ExternalVerifyErrorCode,
-  type IDKitResult as ExternalVerifyResult
-} from "@worldcoin/idkit";
-import { ConnectButton, useActiveAccount, useActiveWalletChain, useWalletBalance } from "thirdweb/react";
+import { ConnectButton, useActiveAccount, useWalletBalance } from "thirdweb/react";
 import AppNav from "../components/AppNav";
 import {
   createRequestForWallet,
-  issueWorldIdRpContextForWallet,
   verifyWorldIdForWallet,
   type MarketRequestInput,
-  type WorldIdRpContext,
   type WorldIdSession
 } from "../lib/api";
 import { formatKnownMiniKitMessage } from "../lib/miniKitErrors";
 import { isThirdwebClientConfigured, thirdwebClient } from "../lib/thirdweb";
-import { clearWorldIdSession, getWorldIdConfig, loadWorldIdSession } from "../lib/worldId";
-import { getWorldAppRuntimeMode, isWorldIdSimulatorContext } from "../lib/worldAppRuntime";
+import { clearWorldIdSession, getWorldIdConfig } from "../lib/worldId";
+import { getWorldAppRuntimeMode } from "../lib/worldAppRuntime";
 import {
-  fetchWorldChainVirtualBalances,
   getWorldChainVirtualConfig,
-  worldChainSepoliaChain,
-  type WorldChainVirtualBalanceSnapshot
+  worldChainSepoliaChain
 } from "../lib/worldChain";
 
 const defaultForm: MarketRequestInput = {
@@ -86,18 +76,9 @@ const similarityTemplates: SimilarRequestTemplate[] = [
 ];
 
 const MINI_VERIFY_TIMEOUT_MS = 20_000;
-const EXTERNAL_VERIFY_TIMEOUT_MS = 90_000;
 const SUBMIT_FLOW_TIMEOUT_MS = 120_000;
 const MINI_INSTALL_RETRY_COUNT = 2;
 const MINI_INSTALL_RETRY_DELAY_MS = 350;
-const externalWorldIdEnvironment = (() => {
-  const raw = (import.meta.env.VITE_WORLD_ID_EXTERNAL_ENVIRONMENT || "staging").trim().toLowerCase();
-  return raw === "production" ? "production" : "staging";
-})();
-const forceExternalWorldId = (() => {
-  const raw = String(import.meta.env.VITE_WORLD_ID_FORCE_EXTERNAL ?? "").trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
-})();
 
 function formatShortAddress(value: string): string {
   const trimmed = value.trim();
@@ -109,23 +90,6 @@ function formatShortAddress(value: string): string {
 
 function normalizeWorldIdSignal(value: string): string {
   return value.trim().toLowerCase();
-}
-
-function formatRemainingDuration(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) {
-    return "expired";
-  }
-  const totalMinutes = Math.floor(ms / 60000);
-  const days = Math.floor(totalMinutes / (60 * 24));
-  const hours = Math.floor((totalMinutes % (60 * 24)) / 60);
-  const minutes = totalMinutes % 60;
-  if (days > 0) {
-    return `${days}d ${hours}h`;
-  }
-  if (hours > 0) {
-    return `${hours}h ${minutes}m`;
-  }
-  return `${minutes}m`;
 }
 
 function looksLikeWorldIdV4ProofPayload(value: Record<string, unknown>): boolean {
@@ -299,29 +263,6 @@ function buildWorldProofFromMiniKit(
   };
 }
 
-function buildWorldProofFromExternalResult(
-  result: ExternalVerifyResult,
-  input: { action: string; signal: string }
-): Record<string, unknown> {
-  const raw = result as unknown as Record<string, unknown>;
-  const responses = raw.responses;
-  if (!Array.isArray(responses) || responses.length === 0) {
-    throw new Error("world_id_external_result_invalid");
-  }
-
-  return {
-    ...raw,
-    action:
-      typeof raw.action === "string" && raw.action.trim().length > 0
-        ? raw.action
-        : input.action,
-    signal:
-      typeof raw.signal === "string" && raw.signal.trim().length > 0
-        ? raw.signal
-        : input.signal
-  };
-}
-
 function getWorldIdErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   if (/^network_timeout:/i.test(message)) {
@@ -349,27 +290,9 @@ function getWorldIdErrorMessage(error: unknown): string {
   if (message === "miniapp_runtime_required") {
     return "Mini App runtime is required. Open this URL from World App Mini Apps.";
   }
-  if (message === "world_id_not_configured_external") {
-    return "World ID external mode is not configured. Set VITE_WORLD_ID_EXTERNAL_APP_ID / VITE_WORLD_ID_EXTERNAL_ACTION.";
-  }
-  if (message === "world_id_external_result_invalid") {
-    return "External widget returned an invalid proof payload. Retry verification.";
-  }
-  if (message === "external_world_id_widget_not_ready") {
-    return "World ID external widget is not ready yet. Retry in a moment.";
-  }
-  if (message === "external_world_id_verify_in_flight") {
-    return "A World ID external verification is already in progress.";
-  }
-  if (message.includes("world_id_rp_context_issue_failed: world_id_rp_signing_key_missing")) {
-    return "Backend is missing WORLD_ID_RP_SIGNING_KEY for web World ID requests.";
-  }
-  if (message.includes("world_id_rp_context_issue_failed: world_id_rp_id_missing")) {
-    return "Backend is missing WORLD_ID_RP_ID for web World ID requests.";
-  }
-  const externalRejectedMatch = message.match(/^world_id_verify_failed:\s*([a-z0-9_]+)$/i);
-  if (externalRejectedMatch) {
-    return `World ID verification failed (${externalRejectedMatch[1]}).`;
+  const verificationRejectedMatch = message.match(/^world_id_verify_failed:\s*([a-z0-9_]+)$/i);
+  if (verificationRejectedMatch) {
+    return `World ID verification failed (${verificationRejectedMatch[1]}).`;
   }
   const normalized = formatKnownMiniKitMessage(message);
   if (normalized) {
@@ -521,7 +444,6 @@ async function ensureMiniKitInstalled(appId: string): Promise<void> {
 export default function SubmitPage() {
   const navigate = useNavigate();
   const activeAccount = useActiveAccount();
-  const activeChain = useActiveWalletChain();
   const walletAddress = activeAccount?.address ?? "";
   const worldIdSignal = normalizeWorldIdSignal(walletAddress);
   const walletConnected = walletAddress.length > 0;
@@ -533,31 +455,15 @@ export default function SubmitPage() {
   });
   const worldIdConfig = getWorldIdConfig();
   const miniWorldIdConfigured = worldIdConfig.mini.configured;
-  const externalWorldIdConfigured = worldIdConfig.external.configured;
   const worldChainVirtualConfig = getWorldChainVirtualConfig();
-  const worldIdSimulatorContext = isWorldIdSimulatorContext();
-  const worldAppMiniRuntimeDetected = getWorldAppRuntimeMode() === "miniapp";
-  const worldAppMiniRuntime = worldAppMiniRuntimeDetected && !forceExternalWorldId && !worldIdSimulatorContext;
-  const effectiveExternalWorldIdEnvironment = worldIdSimulatorContext ? "staging" : externalWorldIdEnvironment;
-  const worldIdConfigured = worldAppMiniRuntime ? miniWorldIdConfigured : externalWorldIdConfigured;
+  const worldAppMiniRuntime = getWorldAppRuntimeMode() === "miniapp";
 
   const [form, setForm] = useState(defaultForm);
   const [requestId, setRequestId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [worldIdSession, setWorldIdSession] = useState<WorldIdSession | null>(null);
-  const [worldChainBalances, setWorldChainBalances] = useState<WorldChainVirtualBalanceSnapshot | null>(null);
-  const [worldChainBalancesLoading, setWorldChainBalancesLoading] = useState(false);
-  const [worldChainBalancesError, setWorldChainBalancesError] = useState<string | null>(null);
-  const [externalWidgetOpen, setExternalWidgetOpen] = useState(false);
-  const [externalRpContext, setExternalRpContext] = useState<WorldIdRpContext | null>(null);
 
   const miniVerifyRawPayloadsRef = useRef<MiniAppVerifyActionPayload[]>([]);
-  const externalVerifyPendingRef = useRef<{
-    timeoutId: number;
-    resolve: (result: ExternalVerifyResult) => void;
-    reject: (error: Error) => void;
-  } | null>(null);
 
   useEffect(() => {
     setForm((prev) => {
@@ -571,56 +477,6 @@ export default function SubmitPage() {
       };
     });
   }, [walletAddress]);
-
-  useEffect(() => {
-    setExternalRpContext(null);
-    setExternalWidgetOpen(false);
-  }, [walletAddress]);
-
-  useEffect(() => {
-    if (!walletConnected) {
-      setWorldIdSession(null);
-      return;
-    }
-    setWorldIdSession(loadWorldIdSession(walletAddress));
-  }, [walletAddress, walletConnected]);
-
-  useEffect(() => {
-    if (!walletConnected || !thirdwebConfigured) {
-      setWorldChainBalances(null);
-      setWorldChainBalancesError(null);
-      setWorldChainBalancesLoading(false);
-      return;
-    }
-
-    let cancelled = false;
-    setWorldChainBalancesLoading(true);
-    setWorldChainBalancesError(null);
-
-    void fetchWorldChainVirtualBalances(walletAddress)
-      .then((snapshot) => {
-        if (cancelled) {
-          return;
-        }
-        setWorldChainBalances(snapshot);
-      })
-      .catch((fetchError) => {
-        if (cancelled) {
-          return;
-        }
-        setWorldChainBalancesError(fetchError instanceof Error ? fetchError.message : String(fetchError));
-      })
-      .finally(() => {
-        if (cancelled) {
-          return;
-        }
-        setWorldChainBalancesLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [walletAddress, walletConnected, thirdwebConfigured]);
 
   useEffect(() => {
     installMiniKitRawDebugHook((event, payload) => {
@@ -646,18 +502,6 @@ export default function SubmitPage() {
     }
   }, [walletConnected, worldAppMiniRuntime, worldIdConfig.mini.configured, worldIdConfig.mini.appId]);
 
-  useEffect(() => {
-    return () => {
-      const pending = externalVerifyPendingRef.current;
-      if (!pending) {
-        return;
-      }
-      window.clearTimeout(pending.timeoutId);
-      externalVerifyPendingRef.current = null;
-      pending.reject(new Error("world_id_verify_cancelled: page_unmounted"));
-    };
-  }, []);
-
   const nativeBalanceText =
     walletBalanceLoading
       ? "Loading..."
@@ -666,42 +510,6 @@ export default function SubmitPage() {
         : walletBalanceError
           ? "Failed to load"
           : "-";
-  const chainText = `${worldChainVirtualConfig.chainName} (virtual, id: ${worldChainVirtualConfig.chainId})`;
-  const connectedChainText = activeChain ? `${activeChain.name} (id: ${activeChain.id})` : "Not connected";
-  const connectedChainMismatch = Boolean(activeChain && activeChain.id !== worldChainVirtualConfig.chainId);
-  const requestCreateReady = walletConnected && thirdwebConfigured;
-  const requestCreateReason = !walletConnected
-    ? "Connect wallet"
-    : !thirdwebConfigured
-      ? "Set VITE_THIRDWEB_CLIENT_ID"
-      : "Ready";
-  const worldIdStatus = worldIdSession ? `Verified (${worldIdSession.verificationLevel ?? "unknown"})` : "Not verified";
-  const worldIdRemaining =
-    worldIdSession && Number.isFinite(Date.parse(worldIdSession.expiresAt))
-      ? formatRemainingDuration(Date.parse(worldIdSession.expiresAt) - Date.now())
-      : "-";
-  const requestSubmitReady =
-    requestCreateReady && worldIdConfigured && (!connectedChainMismatch || worldAppMiniRuntime);
-  const requestSubmitReason = !walletConnected
-    ? "Connect wallet"
-    : !thirdwebConfigured
-      ? "Set VITE_THIRDWEB_CLIENT_ID"
-      : connectedChainMismatch && !worldAppMiniRuntime
-        ? `Switch wallet chain to ${worldChainVirtualConfig.chainName} (${worldChainVirtualConfig.chainId})`
-      : !worldIdConfigured
-        ? worldAppMiniRuntime
-          ? "Configure VITE_WORLD_ID_MINI_APP_ID / VITE_WORLD_ID_MINI_ACTION"
-          : "Configure VITE_WORLD_ID_EXTERNAL_APP_ID / VITE_WORLD_ID_EXTERNAL_ACTION"
-        : worldAppMiniRuntime
-          ? "Ready (Mini App World ID required)"
-          : "Ready (External World ID widget required)";
-  const worldChainNativeBalanceText = worldChainBalancesLoading
-    ? "Loading..."
-    : worldChainBalances?.native
-      ? `${worldChainBalances.native.displayValue} ${worldChainBalances.native.symbol}`
-      : worldChainBalancesError
-        ? "Failed to load"
-        : "-";
 
   const applySimilarityTemplate = (template: SimilarRequestTemplate) => {
     setForm((prev) => ({
@@ -713,74 +521,6 @@ export default function SubmitPage() {
       submitterAddress: walletAddress || prev.submitterAddress
     }));
     setError(null);
-  };
-
-  const onExternalWorldIdSuccess = (result: ExternalVerifyResult) => {
-    const pending = externalVerifyPendingRef.current;
-    if (!pending) {
-      return;
-    }
-    window.clearTimeout(pending.timeoutId);
-    externalVerifyPendingRef.current = null;
-    setExternalWidgetOpen(false);
-    pending.resolve(result);
-  };
-
-  const onExternalWorldIdError = (errorCode: ExternalVerifyErrorCode) => {
-    const pending = externalVerifyPendingRef.current;
-    if (!pending) {
-      return;
-    }
-    window.clearTimeout(pending.timeoutId);
-    externalVerifyPendingRef.current = null;
-    setExternalWidgetOpen(false);
-    pending.reject(new Error(`world_id_verify_failed: ${errorCode}`));
-  };
-
-  const onExternalWidgetOpenChange = (open: boolean) => {
-    setExternalWidgetOpen(open);
-    if (open) {
-      return;
-    }
-    const pending = externalVerifyPendingRef.current;
-    if (!pending) {
-      return;
-    }
-    window.clearTimeout(pending.timeoutId);
-    externalVerifyPendingRef.current = null;
-    pending.reject(new Error("world_id_verify_cancelled: widget_closed"));
-  };
-
-  const runExternalWorldIdVerifyCommand = async (): Promise<ExternalVerifyResult> => {
-    if (externalVerifyPendingRef.current) {
-      throw new Error("external_world_id_verify_in_flight");
-    }
-
-    const rpContextResult = await issueWorldIdRpContextForWallet({
-      walletAddress,
-      account: activeAccount
-    });
-    setExternalRpContext(rpContextResult.rpContext);
-
-    return new Promise<ExternalVerifyResult>((resolve, reject) => {
-      const timeoutId = window.setTimeout(() => {
-        const pending = externalVerifyPendingRef.current;
-        if (!pending) {
-          return;
-        }
-        externalVerifyPendingRef.current = null;
-        setExternalWidgetOpen(false);
-        pending.reject(new Error("world_id_verify_timeout: no verify response returned from external widget."));
-      }, EXTERNAL_VERIFY_TIMEOUT_MS);
-
-      externalVerifyPendingRef.current = {
-        timeoutId,
-        resolve,
-        reject
-      };
-
-      setExternalWidgetOpen(true);
-    });
   };
 
   const verifyWorldIdForSubmitMiniApp = async (): Promise<WorldIdSession> => {
@@ -852,37 +592,7 @@ export default function SubmitPage() {
     return result.session;
   };
 
-  const verifyWorldIdForSubmitExternal = async (): Promise<WorldIdSession> => {
-    if (!activeAccount) {
-      throw new Error("wallet_account_required");
-    }
-    if (!worldIdConfig.external.configured) {
-      throw new Error("world_id_not_configured_external");
-    }
-
-    const externalResult = await runExternalWorldIdVerifyCommand();
-    const proof = buildWorldProofFromExternalResult(externalResult, {
-      action: worldIdConfig.external.action,
-      signal: worldIdSignal
-    });
-
-    const result = await verifyWorldIdForWallet({
-      walletAddress,
-      proof,
-      appId: worldIdConfig.external.appId,
-      action: worldIdConfig.external.action,
-      clientSource: "external",
-      account: activeAccount
-    });
-    return result.session;
-  };
-
-  const verifyWorldIdForSubmit = async (): Promise<WorldIdSession> => {
-    if (worldAppMiniRuntime) {
-      return verifyWorldIdForSubmitMiniApp();
-    }
-    return verifyWorldIdForSubmitExternal();
-  };
+  const verifyWorldIdForSubmit = async (): Promise<WorldIdSession> => verifyWorldIdForSubmitMiniApp();
 
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -907,19 +617,15 @@ export default function SubmitPage() {
       return;
     }
 
-    if (!worldIdConfigured) {
-      setError(
-        worldAppMiniRuntime
-          ? "World ID is not configured. Set VITE_WORLD_ID_MINI_APP_ID / VITE_WORLD_ID_MINI_ACTION."
-          : "World ID external mode is not configured. Set VITE_WORLD_ID_EXTERNAL_APP_ID / VITE_WORLD_ID_EXTERNAL_ACTION."
-      );
+    if (!worldAppMiniRuntime) {
+      setError("Mini App runtime is required. Open this app from World App Mini Apps.");
       window.clearTimeout(submitTimeoutId);
       setSubmitting(false);
       return;
     }
 
-    if (connectedChainMismatch && !worldAppMiniRuntime) {
-      setError(`wallet_chain_mismatch: switch wallet chain to ${worldChainVirtualConfig.chainName} (${worldChainVirtualConfig.chainId})`);
+    if (!miniWorldIdConfigured) {
+      setError("World ID is not configured. Set VITE_WORLD_ID_MINI_APP_ID / VITE_WORLD_ID_MINI_ACTION.");
       window.clearTimeout(submitTimeoutId);
       setSubmitting(false);
       return;
@@ -927,15 +633,12 @@ export default function SubmitPage() {
 
     try {
       clearWorldIdSession(walletAddress);
-      setWorldIdSession(null);
 
       const session = await verifyWorldIdForSubmit();
-      setWorldIdSession(session);
 
       const created = await createRequestForWallet(form, walletAddress, session.token, activeAccount);
       setRequestId(created.requestId);
       clearWorldIdSession(walletAddress);
-      setWorldIdSession(null);
       navigate(`/result/${encodeURIComponent(created.requestId)}`);
     } catch (err) {
       const message = getWorldIdErrorMessage(err);
@@ -944,7 +647,6 @@ export default function SubmitPage() {
         message.includes("world_id_verify_failed")
       ) {
         clearWorldIdSession(walletAddress);
-        setWorldIdSession(null);
       }
       setError(message);
     } finally {
@@ -968,23 +670,13 @@ export default function SubmitPage() {
             <span className="chip">4 DON Nodes</span>
             <span className="chip">Weighted Consensus</span>
             <span className="chip">Tenderly Finalization</span>
-            <span className="chip">Mini App + Web Simulator</span>
+            <span className="chip">Mini App Only</span>
           </div>
           <p className="config-warning runtime-note">
             {worldAppMiniRuntime
               ? "In World App: Submit triggers in-app World ID verification before queueing."
-              : `In Web: Submit opens external World ID widget (${effectiveExternalWorldIdEnvironment}) before queueing.`}
+              : "In Web: Submit is disabled. Open this app from World App Mini Apps."}
           </p>
-          {worldIdSimulatorContext && (
-            <p className="config-warning runtime-note">
-              World ID simulator context detected. External widget mode and <code>staging</code> are forced.
-            </p>
-          )}
-          {forceExternalWorldId && worldAppMiniRuntimeDetected && (
-            <p className="config-warning runtime-note">
-              External mode is forced by <code>VITE_WORLD_ID_FORCE_EXTERNAL</code>. MiniKit path is bypassed.
-            </p>
-          )}
           <div className="wallet-row">
             {thirdwebConfigured ? (
               <ConnectButton
@@ -1084,8 +776,8 @@ export default function SubmitPage() {
                 submitting ||
                 !walletConnected ||
                 !thirdwebConfigured ||
-                !worldIdConfigured ||
-                (connectedChainMismatch && !worldAppMiniRuntime)
+                !miniWorldIdConfigured ||
+                !worldAppMiniRuntime
               }
             >
               {submitting ? "Verifying And Queueing..." : "Verify And Queue"}
@@ -1112,21 +804,6 @@ export default function SubmitPage() {
 
         {error && <p className="error-text">{error}</p>}
 
-        {externalWorldIdConfigured && externalRpContext && (
-          <IDKitRequestWidget
-            open={externalWidgetOpen}
-            onOpenChange={onExternalWidgetOpenChange}
-            app_id={worldIdConfig.external.appId as `app_${string}`}
-            action={worldIdConfig.external.action}
-            rp_context={externalRpContext}
-            preset={deviceLegacy({ signal: worldIdSignal })}
-            allow_legacy_proofs
-            environment={effectiveExternalWorldIdEnvironment}
-            autoClose
-            onSuccess={onExternalWorldIdSuccess}
-            onError={onExternalWorldIdError}
-          />
-        )}
       </main>
     </div>
   );
