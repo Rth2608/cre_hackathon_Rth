@@ -453,18 +453,19 @@ async function syncRequestVectorStatusOnchain(
   vectorStatus: NonNullable<StoredRequest["vectorSync"]>["vectorStatus"],
   trigger: string
 ): Promise<StoredRequest> {
+  const latestRecord = (await getRequest(record.requestId)) ?? record;
   if (!resolveRequestVectorOnchainEnabled()) {
-    return record;
+    return latestRecord;
   }
 
-  const payload = buildVectorOnchainPayload({ record, vectorStatus, trigger });
-  if (record.vectorOnchain?.state === "APPLIED" && record.vectorOnchain.screeningHash === payload.screeningHash) {
-    return record;
+  const payload = buildVectorOnchainPayload({ record: latestRecord, vectorStatus, trigger });
+  if (latestRecord.vectorOnchain?.state === "APPLIED" && latestRecord.vectorOnchain.screeningHash === payload.screeningHash) {
+    return latestRecord;
   }
 
-  const currentAttempts = record.vectorOnchain?.attempts ?? 0;
+  const currentAttempts = latestRecord.vectorOnchain?.attempts ?? 0;
   const applyingRecord: StoredRequest = {
-    ...record,
+    ...latestRecord,
     vectorOnchain: {
       state: "APPLYING",
       vectorStatus,
@@ -478,7 +479,7 @@ async function syncRequestVectorStatusOnchain(
       evidenceUri: payload.evidenceUri,
       attempts: currentAttempts + 1,
       updatedAt: nowIso(),
-      onchainReceipt: record.vectorOnchain?.onchainReceipt,
+      onchainReceipt: latestRecord.vectorOnchain?.onchainReceipt,
       lastError: undefined
     }
   };
@@ -495,10 +496,21 @@ async function syncRequestVectorStatusOnchain(
       reasonHash: payload.reasonHash,
       evidenceUri: payload.evidenceUri
     });
+    const latestBeforeApply = await getRequest(record.requestId);
+    if (latestBeforeApply && latestBeforeApply.status !== applyingRecord.status) {
+      logServerEvent("warn", "request.vector_onchain.stale_skip", {
+        requestId: latestBeforeApply.requestId,
+        staleStatus: applyingRecord.status,
+        latestStatus: latestBeforeApply.status,
+        trigger
+      });
+      return latestBeforeApply;
+    }
+    const applyBase = latestBeforeApply ?? applyingRecord;
     const appliedRecord: StoredRequest = {
-      ...applyingRecord,
+      ...applyBase,
       vectorOnchain: {
-        ...applyingRecord.vectorOnchain!,
+        ...(applyBase.vectorOnchain ?? applyingRecord.vectorOnchain!),
         state: "APPLIED",
         updatedAt: nowIso(),
         onchainReceipt,
@@ -516,10 +528,21 @@ async function syncRequestVectorStatusOnchain(
     });
     return appliedRecord;
   } catch (error) {
+    const latestBeforeFail = await getRequest(record.requestId);
+    if (latestBeforeFail && latestBeforeFail.status !== applyingRecord.status) {
+      logServerEvent("warn", "request.vector_onchain.stale_skip", {
+        requestId: latestBeforeFail.requestId,
+        staleStatus: applyingRecord.status,
+        latestStatus: latestBeforeFail.status,
+        trigger
+      });
+      return latestBeforeFail;
+    }
+    const failBase = latestBeforeFail ?? applyingRecord;
     const failedRecord: StoredRequest = {
-      ...applyingRecord,
+      ...failBase,
       vectorOnchain: {
-        ...applyingRecord.vectorOnchain!,
+        ...(failBase.vectorOnchain ?? applyingRecord.vectorOnchain!),
         state: "FAILED",
         updatedAt: nowIso(),
         lastError: stringifyError(error)
@@ -590,18 +613,19 @@ async function syncRequestVectorStatus(
   record: StoredRequest,
   trigger: string
 ): Promise<StoredRequest> {
+  const latestRecord = (await getRequest(record.requestId)) ?? record;
   if (!resolveRequestVectorSyncEnabled()) {
-    return record;
+    return latestRecord;
   }
 
-  const vectorStatus = mapRequestStatusToVectorStatus(record.status);
-  if (record.vectorSync?.state === "APPLIED" && record.vectorSync.vectorStatus === vectorStatus) {
-    return syncRequestVectorStatusOnchain(record, vectorStatus, `${trigger}_already_applied`);
+  const vectorStatus = mapRequestStatusToVectorStatus(latestRecord.status);
+  if (latestRecord.vectorSync?.state === "APPLIED" && latestRecord.vectorSync.vectorStatus === vectorStatus) {
+    return syncRequestVectorStatusOnchain(latestRecord, vectorStatus, `${trigger}_already_applied`);
   }
 
-  const currentAttempts = record.vectorSync?.attempts ?? 0;
+  const currentAttempts = latestRecord.vectorSync?.attempts ?? 0;
   const applyingRecord: StoredRequest = {
-    ...record,
+    ...latestRecord,
     vectorSync: {
       state: "APPLYING",
       vectorStatus,
@@ -649,11 +673,22 @@ async function syncRequestVectorStatus(
       const detail = (await response.text()).trim().slice(0, 300);
       throw new Error(`vector_sync_http_${response.status}${detail ? `:${detail}` : ""}`);
     }
+    const latestBeforeApply = await getRequest(record.requestId);
+    if (latestBeforeApply && latestBeforeApply.status !== applyingRecord.status) {
+      logServerEvent("warn", "request.vector_sync.stale_skip", {
+        requestId: latestBeforeApply.requestId,
+        staleStatus: applyingRecord.status,
+        latestStatus: latestBeforeApply.status,
+        trigger
+      });
+      return latestBeforeApply;
+    }
+    const applyBase = latestBeforeApply ?? applyingRecord;
 
     const appliedRecord: StoredRequest = {
-      ...applyingRecord,
+      ...applyBase,
       vectorSync: {
-        ...applyingRecord.vectorSync!,
+        ...(applyBase.vectorSync ?? applyingRecord.vectorSync!),
         state: "APPLIED",
         updatedAt: nowIso(),
         lastError: undefined
@@ -669,10 +704,21 @@ async function syncRequestVectorStatus(
     });
     return appliedWithOnchain;
   } catch (error) {
+    const latestBeforeFail = await getRequest(record.requestId);
+    if (latestBeforeFail && latestBeforeFail.status !== applyingRecord.status) {
+      logServerEvent("warn", "request.vector_sync.stale_skip", {
+        requestId: latestBeforeFail.requestId,
+        staleStatus: applyingRecord.status,
+        latestStatus: latestBeforeFail.status,
+        trigger
+      });
+      return latestBeforeFail;
+    }
+    const failBase = latestBeforeFail ?? applyingRecord;
     const failedRecord: StoredRequest = {
-      ...applyingRecord,
+      ...failBase,
       vectorSync: {
-        ...applyingRecord.vectorSync!,
+        ...(failBase.vectorSync ?? applyingRecord.vectorSync!),
         state: "FAILED",
         updatedAt: nowIso(),
         lastError: stringifyError(error)
