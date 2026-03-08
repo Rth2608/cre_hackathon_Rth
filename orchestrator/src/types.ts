@@ -187,6 +187,23 @@ export interface OnchainReceipt {
   submissionAttempts?: number;
 }
 
+export interface VectorScreeningOnchainRecord {
+  state: "PENDING" | "APPLYING" | "APPLIED" | "FAILED";
+  vectorStatus: "QUEUED" | "VERIFYING" | "APPROVED_PENDING_OPEN" | "OPEN" | "CLOSED" | "REJECTED";
+  queueDecision: "allow" | "reject_duplicate" | "reject_conflict";
+  vectorStatusCode: number;
+  queueDecisionCode: number;
+  screeningHash: string;
+  reasonHash: string;
+  similarityBps: number;
+  matchedRequestId?: string;
+  evidenceUri: string;
+  attempts: number;
+  updatedAt: string;
+  onchainReceipt?: OnchainReceipt;
+  lastError?: string;
+}
+
 export interface StoredRequest {
   requestId: string;
   input: MarketRequestInput;
@@ -203,11 +220,14 @@ export interface StoredRequest {
   queueDecision?: {
     decision: "allow" | "reject_duplicate" | "reject_conflict";
     reason?: string;
+    matchedRequestId?: string;
+    similarity?: number;
     dedupeKey: string;
     conflictKey: string;
     source: "heuristic" | "screening_service" | "heuristic+screening_service";
     evaluatedAt: string;
   };
+  vectorOnchain?: VectorScreeningOnchainRecord;
   runAttempts: number;
   nodeReports?: NodeReport[];
   signedNodeReports?: SignedNodeReport[];

@@ -25,6 +25,7 @@ export default function ResultPage() {
   const walletAddress = activeAccount?.address ?? "";
   const walletConnected = walletAddress.length > 0;
   const thirdwebConfigured = isThirdwebClientConfigured();
+  const requireWorldIdOnRun = String(import.meta.env.VITE_REQUEST_REQUIRE_WORLD_ID_ON_RUN ?? "true").trim().toLowerCase() !== "false";
 
   const [request, setRequest] = useState<RequestRecord | null>(null);
   const [loading, setLoading] = useState(true);
@@ -85,9 +86,19 @@ export default function ResultPage() {
     if (request.status === "FINALIZED") return "Already finalized";
     if (request.status === "REJECTED_DUPLICATE" || request.status === "REJECTED_CONFLICT") return "Rejected in queue screening";
     if (request.runAttempts >= 2) return "Max attempts reached";
-    if (!worldIdSession?.token || !worldIdSessionActive) return "Verify World ID again";
+    if (requireWorldIdOnRun && (!worldIdSession?.token || !worldIdSessionActive)) return "Verify World ID again";
     return "Ready";
-  }, [requestId, request, thirdwebConfigured, walletConnected, activeAccount, ownedByConnectedWallet, worldIdSession, worldIdSessionActive]);
+  }, [
+    requestId,
+    request,
+    thirdwebConfigured,
+    walletConnected,
+    activeAccount,
+    ownedByConnectedWallet,
+    worldIdSession,
+    worldIdSessionActive,
+    requireWorldIdOnRun
+  ]);
 
   const canRunVerification = runVerificationReason === "Ready";
   const derivedTraceId = requestId && request && request.runAttempts > 0 ? `${requestId}:run:${request.runAttempts}` : null;
@@ -118,7 +129,7 @@ export default function ResultPage() {
       setError("Connected wallet must match the request submitter to run verification.");
       return;
     }
-    if (!worldIdSession?.token || !worldIdSessionActive) {
+    if (requireWorldIdOnRun && (!worldIdSession?.token || !worldIdSessionActive)) {
       setError("World ID session is missing or expired. Re-verify in Verify page.");
       return;
     }
@@ -126,14 +137,17 @@ export default function ResultPage() {
     setRunningVerification(true);
     setError(null);
     try {
-      const updated = await runVerificationForWallet(requestId, walletAddress, worldIdSession.token, activeAccount);
+      const runWorldIdToken = requireWorldIdOnRun ? worldIdSession?.token : undefined;
+      const updated = await runVerificationForWallet(requestId, walletAddress, runWorldIdToken, activeAccount);
       const traceId = updated.traceId || updated.workflow?.traceId;
       if (traceId) {
         setLastRunTraceId(traceId);
       }
 
-      clearWorldIdSession(walletAddress);
-      setWorldIdSession(null);
+      if (requireWorldIdOnRun) {
+        clearWorldIdSession(walletAddress);
+        setWorldIdSession(null);
+      }
       setRequest(updated);
       await load();
     } catch (err) {
@@ -248,6 +262,32 @@ export default function ResultPage() {
                   {request.vectorSync.lastError && (
                     <p>
                       <strong>Vector Error:</strong> {request.vectorSync.lastError}
+                    </p>
+                  )}
+                </>
+              )}
+              {request.vectorOnchain && (
+                <>
+                  <p>
+                    <strong>Vector Onchain:</strong> {request.vectorOnchain.state} / {request.vectorOnchain.vectorStatus}
+                  </p>
+                  <p>
+                    <strong>Vector Onchain Updated:</strong> {new Date(request.vectorOnchain.updatedAt).toLocaleString()}
+                  </p>
+                  <p>
+                    <strong>Vector Screening Hash:</strong> <span className="mono">{request.vectorOnchain.screeningHash}</span>
+                  </p>
+                  <p>
+                    <strong>Vector Evidence URI:</strong> <span className="mono">{request.vectorOnchain.evidenceUri}</span>
+                  </p>
+                  {request.vectorOnchain.onchainReceipt?.txHash && (
+                    <p>
+                      <strong>Vector Onchain Tx:</strong> <span className="mono">{request.vectorOnchain.onchainReceipt.txHash}</span>
+                    </p>
+                  )}
+                  {request.vectorOnchain.lastError && (
+                    <p>
+                      <strong>Vector Onchain Error:</strong> {request.vectorOnchain.lastError}
                     </p>
                   )}
                 </>

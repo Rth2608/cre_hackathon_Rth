@@ -31,6 +31,8 @@ export interface RequestRecord {
   queueDecision?: {
     decision: "allow" | "reject_duplicate" | "reject_conflict";
     reason?: string;
+    matchedRequestId?: string;
+    similarity?: number;
     dedupeKey: string;
     conflictKey: string;
     source: "heuristic" | "screening_service" | "heuristic+screening_service";
@@ -58,6 +60,32 @@ export interface RequestRecord {
     idempotencyKey?: string;
     idempotencyReused?: boolean;
     submissionAttempts?: number;
+  };
+  vectorOnchain?: {
+    state: "PENDING" | "APPLYING" | "APPLIED" | "FAILED";
+    vectorStatus: "QUEUED" | "VERIFYING" | "APPROVED_PENDING_OPEN" | "OPEN" | "CLOSED" | "REJECTED";
+    queueDecision: "allow" | "reject_duplicate" | "reject_conflict";
+    vectorStatusCode: number;
+    queueDecisionCode: number;
+    screeningHash: string;
+    reasonHash: string;
+    similarityBps: number;
+    matchedRequestId?: string;
+    evidenceUri: string;
+    attempts: number;
+    updatedAt: string;
+    onchainReceipt?: {
+      txHash: string;
+      blockNumber: number;
+      gasUsed: string;
+      chainId: number;
+      explorerUrl?: string;
+      simulated: boolean;
+      idempotencyKey?: string;
+      idempotencyReused?: boolean;
+      submissionAttempts?: number;
+    };
+    lastError?: string;
   };
   paymentReceipt?: {
     x402Enabled: boolean;

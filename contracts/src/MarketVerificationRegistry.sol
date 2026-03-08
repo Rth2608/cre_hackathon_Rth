@@ -4,6 +4,8 @@ pragma solidity ^0.8.24;
 contract MarketVerificationRegistry {
     uint8 private constant NODE_ACTION_ACTIVATED = 1;
     uint8 private constant NODE_ACTION_HEARTBEAT = 2;
+    uint8 private constant VECTOR_STATUS_REJECTED = 5;
+    uint8 private constant QUEUE_DECISION_REJECT_CONFLICT = 2;
 
     error UnauthorizedCoordinator();
     error UnauthorizedOwner();
@@ -12,6 +14,8 @@ contract MarketVerificationRegistry {
     error InvalidOwner();
     error InvalidScore();
     error InvalidResponderCount();
+    error InvalidVectorStatus();
+    error InvalidQueueDecision();
     error InvalidHash();
     error InvalidNodeAction();
     error LifecycleAlreadyRecorded(bytes32 lifecycleId);
@@ -27,6 +31,19 @@ contract MarketVerificationRegistry {
         uint8 responders;
         bytes32 reportHash;
         string reportUri;
+        address coordinator;
+        uint256 timestamp;
+    }
+
+    struct VectorScreeningRecord {
+        bytes32 requestId;
+        uint8 vectorStatus;
+        uint8 queueDecision;
+        uint16 similarityBps;
+        bytes32 matchedRequestId;
+        bytes32 screeningHash;
+        bytes32 reasonHash;
+        string evidenceUri;
         address coordinator;
         uint256 timestamp;
     }
@@ -48,6 +65,7 @@ contract MarketVerificationRegistry {
     address public coordinator;
 
     mapping(bytes32 => VerificationRecord) private _records;
+    mapping(bytes32 => VectorScreeningRecord) private _vectorRecords;
     mapping(bytes32 => bool) private _lifecycleRecords;
     mapping(bytes32 => PorProofRecord) private _porProofs;
     mapping(uint32 => uint64) private _latestPorEpochByMarket;
@@ -62,6 +80,19 @@ contract MarketVerificationRegistry {
         uint8 responders,
         bytes32 reportHash,
         string reportUri,
+        address coordinator,
+        uint256 timestamp
+    );
+
+    event VectorScreeningRecorded(
+        bytes32 indexed requestId,
+        uint8 vectorStatus,
+        uint8 queueDecision,
+        uint16 similarityBps,
+        bytes32 indexed matchedRequestId,
+        bytes32 screeningHash,
+        bytes32 reasonHash,
+        string evidenceUri,
         address coordinator,
         uint256 timestamp
     );
@@ -198,6 +229,64 @@ contract MarketVerificationRegistry {
 
     function getVerification(bytes32 requestId) external view returns (VerificationRecord memory) {
         return _records[requestId];
+    }
+
+    function hasVectorScreening(bytes32 requestId) external view returns (bool) {
+        return _vectorRecords[requestId].timestamp != 0;
+    }
+
+    function getVectorScreening(bytes32 requestId) external view returns (VectorScreeningRecord memory) {
+        return _vectorRecords[requestId];
+    }
+
+    function recordVectorScreening(
+        bytes32 requestId,
+        uint8 vectorStatus,
+        uint8 queueDecision,
+        uint16 similarityBps,
+        bytes32 matchedRequestId,
+        bytes32 screeningHash,
+        bytes32 reasonHash,
+        string calldata evidenceUri
+    ) external onlyCoordinator {
+        if (requestId == bytes32(0) || screeningHash == bytes32(0) || reasonHash == bytes32(0)) {
+            revert InvalidHash();
+        }
+        if (vectorStatus > VECTOR_STATUS_REJECTED) {
+            revert InvalidVectorStatus();
+        }
+        if (queueDecision > QUEUE_DECISION_REJECT_CONFLICT) {
+            revert InvalidQueueDecision();
+        }
+        if (similarityBps > 10000) {
+            revert InvalidScore();
+        }
+
+        _vectorRecords[requestId] = VectorScreeningRecord({
+            requestId: requestId,
+            vectorStatus: vectorStatus,
+            queueDecision: queueDecision,
+            similarityBps: similarityBps,
+            matchedRequestId: matchedRequestId,
+            screeningHash: screeningHash,
+            reasonHash: reasonHash,
+            evidenceUri: evidenceUri,
+            coordinator: msg.sender,
+            timestamp: block.timestamp
+        });
+
+        emit VectorScreeningRecorded(
+            requestId,
+            vectorStatus,
+            queueDecision,
+            similarityBps,
+            matchedRequestId,
+            screeningHash,
+            reasonHash,
+            evidenceUri,
+            msg.sender,
+            block.timestamp
+        );
     }
 
     function hasNodeLifecycle(bytes32 lifecycleId) external view returns (bool) {

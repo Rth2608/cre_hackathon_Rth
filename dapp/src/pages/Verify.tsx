@@ -430,6 +430,7 @@ export default function VerifyPage() {
   const worldIdConfig = getWorldIdConfig();
   const worldAppMiniRuntime = getWorldAppRuntimeMode() === "miniapp";
   const miniWorldIdConfigured = worldIdConfig.mini.configured;
+  const requireWorldIdOnRun = String(import.meta.env.VITE_REQUEST_REQUIRE_WORLD_ID_ON_RUN ?? "true").trim().toLowerCase() !== "false";
   const worldChainVirtualConfig = getWorldChainVirtualConfig();
 
   const [requests, setRequests] = useState<RequestRecord[]>([]);
@@ -721,16 +722,19 @@ export default function VerifyPage() {
       return;
     }
 
-    if (!worldIdSession?.token || !worldIdSessionActive) {
+    if (requireWorldIdOnRun && (!worldIdSession?.token || !worldIdSessionActive)) {
       setError("Verify World ID first to run queued verification.");
       return;
     }
 
     setRunningRequestId(record.requestId);
     try {
-      await runVerificationForWallet(record.requestId, walletAddress, worldIdSession.token, activeAccount);
-      clearWorldIdSession(walletAddress);
-      setWorldIdSession(null);
+      const runWorldIdToken = requireWorldIdOnRun ? worldIdSession?.token : undefined;
+      await runVerificationForWallet(record.requestId, walletAddress, runWorldIdToken, activeAccount);
+      if (requireWorldIdOnRun) {
+        clearWorldIdSession(walletAddress);
+        setWorldIdSession(null);
+      }
       setNotice(`Verification triggered for ${record.requestId}.`);
       await load();
     } catch (err) {
@@ -753,7 +757,11 @@ export default function VerifyPage() {
         <header className="hero compact">
           <p className="eyebrow">Mini App Verify</p>
           <h1>Verification Dashboard</h1>
-          <p>Verify World ID, then run queued request verification from this wallet.</p>
+          <p>
+            {requireWorldIdOnRun
+              ? "Verify World ID, then run queued request verification from this wallet."
+              : "Run queued request verification from this wallet."}
+          </p>
           <div className="wallet-row">
             {thirdwebConfigured ? (
               <ConnectButton
@@ -906,13 +914,11 @@ export default function VerifyPage() {
                   <span>Action</span>
                 </div>
                 {myRequests.map((record) => {
+                  const hasRunWorldId = !requireWorldIdOnRun || (Boolean(worldIdSession?.token) && worldIdSessionActive);
                   const canRunPending =
-                    record.status === "PENDING" &&
-                    Boolean(worldIdSession?.token) &&
-                    worldIdSessionActive &&
-                    runningRequestId === null;
+                    record.status === "PENDING" && hasRunWorldId && runningRequestId === null;
                   const pendingReason =
-                    !worldIdSession?.token || !worldIdSessionActive
+                    !hasRunWorldId
                       ? "verify world id"
                       : runningRequestId !== null
                         ? "another run in progress"
@@ -973,18 +979,18 @@ export default function VerifyPage() {
                 const ownedByConnectedWallet =
                   walletConnected &&
                   record.input.submitterAddress.trim().toLowerCase() === walletAddress.trim().toLowerCase();
+                const hasRunWorldId = !requireWorldIdOnRun || (Boolean(worldIdSession?.token) && worldIdSessionActive);
                 const canRunPending =
                   record.status === "PENDING" &&
                   ownedByConnectedWallet &&
-                  Boolean(worldIdSession?.token) &&
-                  worldIdSessionActive &&
+                  hasRunWorldId &&
                   runningRequestId === null;
                 const pendingReason =
                   !walletConnected
                     ? "connect wallet"
                     : !ownedByConnectedWallet
                       ? "submitter wallet only"
-                      : !worldIdSession?.token || !worldIdSessionActive
+                      : !hasRunWorldId
                         ? "verify world id"
                         : runningRequestId !== null
                           ? "another run in progress"

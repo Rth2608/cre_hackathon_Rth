@@ -12,7 +12,12 @@ import {
   touchNodeHeartbeat
 } from "./nodeRegistry";
 import { getRequestFromOnchain, listNodesFromOnchain, listRequestsFromOnchain } from "./onchainReader";
-import { submitConsensusOnchain, submitNodeLifecycleOnchain, submitPorProofOnchain } from "./onchainWriter";
+import {
+  submitConsensusOnchain,
+  submitNodeLifecycleOnchain,
+  submitPorProofOnchain,
+  submitVectorScreeningOnchain
+} from "./onchainWriter";
 import { buildNextPorProofInput, getPorStatusSnapshot } from "./por";
 import { getRequest, listRequests, saveRequest } from "./storage";
 import { generateRequestId, hashObject, nowIso, resolveProjectPath } from "./utils";
@@ -124,11 +129,38 @@ function buildRequestResponse(record: StoredRequest): Record<string, unknown> {
     consensus: record.consensus,
     consensusBundle: record.consensusBundle,
     onchainReceipt: record.onchainReceipt,
+    vectorOnchain: record.vectorOnchain,
     activeNodes: record.activeNodes,
     paymentReceipt: record.paymentReceipt,
     workflowStepLogs: record.workflowStepLogs,
     lastError: record.lastError
   };
+}
+
+function mergeLocalAndOnchainRequest(localRecord: StoredRequest | null, onchainRecord: StoredRequest): StoredRequest {
+  if (!localRecord) {
+    return onchainRecord;
+  }
+  return {
+    ...localRecord,
+    status: onchainRecord.status,
+    consensus: onchainRecord.consensus ?? localRecord.consensus,
+    onchainReceipt: onchainRecord.onchainReceipt ?? localRecord.onchainReceipt,
+    runAttempts: Math.max(localRecord.runAttempts ?? 0, onchainRecord.runAttempts ?? 0),
+    updatedAt: [localRecord.updatedAt, onchainRecord.updatedAt].sort((a, b) => b.localeCompare(a))[0]
+  };
+}
+
+function mergeLocalAndOnchainRequestLists(localRecords: StoredRequest[], onchainRecords: StoredRequest[]): StoredRequest[] {
+  const byRequestId = new Map<string, StoredRequest>();
+  for (const localRecord of localRecords) {
+    byRequestId.set(localRecord.requestId, localRecord);
+  }
+  for (const onchainRecord of onchainRecords) {
+    const existing = byRequestId.get(onchainRecord.requestId) ?? null;
+    byRequestId.set(onchainRecord.requestId, mergeLocalAndOnchainRequest(existing, onchainRecord));
+  }
+  return [...byRequestId.values()];
 }
 
 function parseRequestIdFromPath(pathname: string, regex: RegExp): string | null {
@@ -144,8 +176,25 @@ function resolveRequestRequireWorldIdOnCreate(): boolean {
   return parseBooleanEnv(process.env.REQUEST_REQUIRE_WORLD_ID_ON_CREATE, true);
 }
 
+function resolveRequestRequireWorldIdOnRun(): boolean {
+  return parseBooleanEnv(process.env.REQUEST_REQUIRE_WORLD_ID_ON_RUN, true);
+}
+
+function resolveNodeRequireWorldIdOnRegister(): boolean {
+  return parseBooleanEnv(process.env.NODE_REQUIRE_WORLD_ID_ON_REGISTER, true);
+}
+
+function resolveNodeRequireWorldIdOnChallenge(): boolean {
+  return parseBooleanEnv(process.env.NODE_REQUIRE_WORLD_ID_ON_CHALLENGE, true);
+}
+
 function resolveRequestRejectConflictEnabled(): boolean {
   return parseBooleanEnv(process.env.REQUEST_REJECT_CONFLICT_ENABLED, true);
+}
+
+function resolveRequestHeuristicPreRejectEnabled(): boolean {
+  const fallback = resolveRequestScreeningServiceUrl() === null;
+  return parseBooleanEnv(process.env.REQUEST_HEURISTIC_PRE_REJECT_ENABLED, fallback);
 }
 
 function resolveRequestScreeningServiceUrl(): string | null {
@@ -189,6 +238,19 @@ function resolveRequestVectorSyncTimeoutMs(): number {
 
 function resolveRequestVectorSyncBlockOnFailure(): boolean {
   return parseBooleanEnv(process.env.REQUEST_VECTOR_SYNC_BLOCK_ON_FAILURE, true);
+}
+
+function resolveRequestVectorOnchainEnabled(): boolean {
+  return parseBooleanEnv(process.env.REQUEST_VECTOR_ONCHAIN_ENABLED, false);
+}
+
+function resolveRequestVectorOnchainBlockOnFailure(): boolean {
+  return parseBooleanEnv(process.env.REQUEST_VECTOR_ONCHAIN_BLOCK_ON_FAILURE, false);
+}
+
+function resolveRequestVectorOnchainEvidenceBaseUri(): string | null {
+  const value = process.env.REQUEST_VECTOR_ONCHAIN_EVIDENCE_BASE_URI?.trim();
+  return value ? value : null;
 }
 
 function resolveRequestStrictFifoResolutionEnabled(): boolean {
@@ -257,6 +319,228 @@ function mapRequestStatusToVectorStatus(
   return "REJECTED";
 }
 
+const REQUEST_ID_IN_REASON_PATTERN = /0x[a-fA-F0-9]{64}/;
+const SIMILARITY_IN_REASON_PATTERN = /similarity=([0-9]+(?:\.[0-9]+)?)/i;
+
+const VECTOR_STATUS_CODE_MAP: Record<NonNullable<StoredRequest["vectorSync"]>["vectorStatus"], number> = {
+  QUEUED: 0,
+  VERIFYING: 1,
+  APPROVED_PENDING_OPEN: 2,
+  OPEN: 3,
+  CLOSED: 4,
+  REJECTED: 5
+};
+
+const QUEUE_DECISION_CODE_MAP: Record<NonNullable<StoredRequest["queueDecision"]>["decision"], number> = {
+  allow: 0,
+  reject_duplicate: 1,
+  reject_conflict: 2
+};
+
+function extractMatchedRequestId(input?: string): string | undefined {
+  if (!input) {
+    return undefined;
+  }
+  const matched = input.match(REQUEST_ID_IN_REASON_PATTERN);
+  return matched?.[0]?.toLowerCase();
+}
+
+function extractSimilarity(input?: string): number | undefined {
+  if (!input) {
+    return undefined;
+  }
+  const matched = input.match(SIMILARITY_IN_REASON_PATTERN);
+  if (!matched) {
+    return undefined;
+  }
+  const parsed = Number.parseFloat(matched[1]);
+  if (!Number.isFinite(parsed)) {
+    return undefined;
+  }
+  return parsed;
+}
+
+function normalizeSimilarityToBps(raw: number | undefined): number {
+  if (!Number.isFinite(raw)) {
+    return 0;
+  }
+  if ((raw as number) <= 1) {
+    return Math.max(0, Math.min(10000, Math.round((raw as number) * 10000)));
+  }
+  if ((raw as number) <= 100) {
+    return Math.max(0, Math.min(10000, Math.round((raw as number) * 100)));
+  }
+  return Math.max(0, Math.min(10000, Math.round(raw as number)));
+}
+
+function buildVectorOnchainEvidenceUri(input: {
+  record: StoredRequest;
+  vectorStatus: NonNullable<StoredRequest["vectorSync"]>["vectorStatus"];
+  trigger: string;
+  screeningHash: string;
+}): string {
+  const base = resolveRequestVectorOnchainEvidenceBaseUri();
+  const query = new URLSearchParams({
+    requestId: input.record.requestId,
+    vectorStatus: input.vectorStatus,
+    trigger: input.trigger,
+    screeningHash: input.screeningHash
+  }).toString();
+  if (base) {
+    return `${base.replace(/\/$/, "")}/${input.record.requestId}?${query}`;
+  }
+  return `urn:cre:vector-screening:${input.record.requestId}:${input.vectorStatus}:${input.trigger}:${input.screeningHash}`;
+}
+
+function buildVectorOnchainPayload(input: {
+  record: StoredRequest;
+  vectorStatus: NonNullable<StoredRequest["vectorSync"]>["vectorStatus"];
+  trigger: string;
+}): {
+  vectorStatusCode: number;
+  queueDecisionCode: number;
+  queueDecision: NonNullable<StoredRequest["queueDecision"]>["decision"];
+  matchedRequestId?: string;
+  similarityBps: number;
+  screeningHash: string;
+  reasonHash: string;
+  evidenceUri: string;
+} {
+  const queueDecision = input.record.queueDecision?.decision ?? "allow";
+  const reason = input.record.queueDecision?.reason ?? input.record.lastError ?? "vector_screening_unspecified";
+  const matchedRequestId =
+    input.record.queueDecision?.matchedRequestId?.toLowerCase() ?? extractMatchedRequestId(reason);
+  const similarityRaw = input.record.queueDecision?.similarity ?? extractSimilarity(reason);
+  const similarityBps = normalizeSimilarityToBps(similarityRaw);
+
+  const screeningHash = hashObject({
+    requestId: input.record.requestId,
+    requestStatus: input.record.status,
+    vectorStatus: input.vectorStatus,
+    vectorStatusCode: VECTOR_STATUS_CODE_MAP[input.vectorStatus],
+    queueDecision,
+    queueDecisionCode: QUEUE_DECISION_CODE_MAP[queueDecision],
+    queuePriority: input.record.queuePriority ?? null,
+    queueSource: input.record.queueDecision?.source ?? null,
+    reason,
+    matchedRequestId: matchedRequestId ?? null,
+    similarityBps,
+    trigger: input.trigger,
+    createdAt: input.record.createdAt,
+    updatedAt: input.record.updatedAt
+  });
+  const reasonHash = hashObject({ reason });
+  const evidenceUri = buildVectorOnchainEvidenceUri({
+    record: input.record,
+    vectorStatus: input.vectorStatus,
+    trigger: input.trigger,
+    screeningHash
+  });
+  return {
+    vectorStatusCode: VECTOR_STATUS_CODE_MAP[input.vectorStatus],
+    queueDecisionCode: QUEUE_DECISION_CODE_MAP[queueDecision],
+    queueDecision,
+    matchedRequestId,
+    similarityBps,
+    screeningHash,
+    reasonHash,
+    evidenceUri
+  };
+}
+
+async function syncRequestVectorStatusOnchain(
+  record: StoredRequest,
+  vectorStatus: NonNullable<StoredRequest["vectorSync"]>["vectorStatus"],
+  trigger: string
+): Promise<StoredRequest> {
+  if (!resolveRequestVectorOnchainEnabled()) {
+    return record;
+  }
+
+  const payload = buildVectorOnchainPayload({ record, vectorStatus, trigger });
+  if (record.vectorOnchain?.state === "APPLIED" && record.vectorOnchain.screeningHash === payload.screeningHash) {
+    return record;
+  }
+
+  const currentAttempts = record.vectorOnchain?.attempts ?? 0;
+  const applyingRecord: StoredRequest = {
+    ...record,
+    vectorOnchain: {
+      state: "APPLYING",
+      vectorStatus,
+      queueDecision: payload.queueDecision,
+      vectorStatusCode: payload.vectorStatusCode,
+      queueDecisionCode: payload.queueDecisionCode,
+      screeningHash: payload.screeningHash,
+      reasonHash: payload.reasonHash,
+      similarityBps: payload.similarityBps,
+      matchedRequestId: payload.matchedRequestId,
+      evidenceUri: payload.evidenceUri,
+      attempts: currentAttempts + 1,
+      updatedAt: nowIso(),
+      onchainReceipt: record.vectorOnchain?.onchainReceipt,
+      lastError: undefined
+    }
+  };
+  await saveRequest(applyingRecord);
+
+  try {
+    const onchainReceipt = await submitVectorScreeningOnchain({
+      requestId: applyingRecord.requestId,
+      vectorStatusCode: payload.vectorStatusCode,
+      queueDecisionCode: payload.queueDecisionCode,
+      similarityBps: payload.similarityBps,
+      matchedRequestId: payload.matchedRequestId,
+      screeningHash: payload.screeningHash,
+      reasonHash: payload.reasonHash,
+      evidenceUri: payload.evidenceUri
+    });
+    const appliedRecord: StoredRequest = {
+      ...applyingRecord,
+      vectorOnchain: {
+        ...applyingRecord.vectorOnchain!,
+        state: "APPLIED",
+        updatedAt: nowIso(),
+        onchainReceipt,
+        lastError: undefined
+      }
+    };
+    await saveRequest(appliedRecord);
+    logServerEvent("info", "request.vector_onchain.applied", {
+      requestId: appliedRecord.requestId,
+      requestStatus: appliedRecord.status,
+      vectorStatus,
+      queueDecision: payload.queueDecision,
+      txHash: onchainReceipt.txHash,
+      trigger
+    });
+    return appliedRecord;
+  } catch (error) {
+    const failedRecord: StoredRequest = {
+      ...applyingRecord,
+      vectorOnchain: {
+        ...applyingRecord.vectorOnchain!,
+        state: "FAILED",
+        updatedAt: nowIso(),
+        lastError: stringifyError(error)
+      }
+    };
+    await saveRequest(failedRecord);
+    logServerFailure("request.vector_onchain.failed", {
+      requestId: failedRecord.requestId,
+      requestStatus: failedRecord.status,
+      vectorStatus,
+      queueDecision: payload.queueDecision,
+      trigger,
+      error: failedRecord.vectorOnchain?.lastError
+    });
+    if (resolveRequestVectorOnchainBlockOnFailure()) {
+      throw error;
+    }
+    return failedRecord;
+  }
+}
+
 function isVectorSyncGateStatus(status: RequestStatus): boolean {
   return status === "FINALIZED" || isRejectedRequestStatus(status);
 }
@@ -312,7 +596,7 @@ async function syncRequestVectorStatus(
 
   const vectorStatus = mapRequestStatusToVectorStatus(record.status);
   if (record.vectorSync?.state === "APPLIED" && record.vectorSync.vectorStatus === vectorStatus) {
-    return record;
+    return syncRequestVectorStatusOnchain(record, vectorStatus, `${trigger}_already_applied`);
   }
 
   const currentAttempts = record.vectorSync?.attempts ?? 0;
@@ -376,13 +660,14 @@ async function syncRequestVectorStatus(
       }
     };
     await saveRequest(appliedRecord);
+    const appliedWithOnchain = await syncRequestVectorStatusOnchain(appliedRecord, vectorStatus, trigger);
     logServerEvent("info", "request.vector_sync.applied", {
-      requestId: appliedRecord.requestId,
-      requestStatus: appliedRecord.status,
+      requestId: appliedWithOnchain.requestId,
+      requestStatus: appliedWithOnchain.status,
       vectorStatus,
       trigger
     });
-    return appliedRecord;
+    return appliedWithOnchain;
   } catch (error) {
     const failedRecord: StoredRequest = {
       ...applyingRecord,
@@ -527,6 +812,8 @@ function isRejectedRequestStatus(status: RequestStatus): boolean {
 interface RequestQueueScreeningResult {
   decision: "allow" | "reject_duplicate" | "reject_conflict";
   reason?: string;
+  matchedRequestId?: string;
+  similarity?: number;
   queuePriority: number;
   dedupeKey: string;
   conflictKey: string;
@@ -536,6 +823,8 @@ interface RequestQueueScreeningResult {
 interface RequestScreeningServiceDecision {
   decision?: "allow" | "reject_duplicate" | "reject_conflict";
   reason?: string;
+  matchedRequestId?: string;
+  similarity?: number;
   queuePriority?: number;
 }
 
@@ -550,14 +839,24 @@ function sanitizeScreeningServiceDecision(value: unknown): RequestScreeningServi
       ? decisionRaw
       : undefined;
   const reason = typeof record.reason === "string" && record.reason.trim() ? record.reason.trim() : undefined;
+  const matchedRequestIdRaw =
+    typeof record.matchedRequestId === "string" && record.matchedRequestId.trim()
+      ? record.matchedRequestId.trim()
+      : undefined;
+  const matchedRequestId = matchedRequestIdRaw ? extractMatchedRequestId(matchedRequestIdRaw) : undefined;
+  const similarityRaw = Number(record.similarity);
+  const similarity =
+    Number.isFinite(similarityRaw) && similarityRaw >= 0 && similarityRaw <= 10_000 ? similarityRaw : undefined;
   const priorityRaw = Number(record.queuePriority);
   const queuePriority = Number.isFinite(priorityRaw) && priorityRaw >= 1 && priorityRaw <= 1000 ? Math.floor(priorityRaw) : undefined;
-  if (!decision && !reason && queuePriority === undefined) {
+  if (!decision && !reason && !matchedRequestId && similarity === undefined && queuePriority === undefined) {
     return null;
   }
   return {
     decision,
     reason,
+    matchedRequestId,
+    similarity,
     queuePriority
   };
 }
@@ -567,7 +866,7 @@ async function callRequestScreeningService(input: {
   existing: StoredRequest[];
   dedupeKey: string;
   conflictKey: string;
-  provisionalDecision: "allow" | "reject_conflict";
+  provisionalDecision: "allow" | "reject_duplicate" | "reject_conflict";
   provisionalReason?: string;
 }): Promise<RequestScreeningServiceDecision | null> {
   const url = resolveRequestScreeningServiceUrl();
@@ -652,16 +951,6 @@ async function evaluateRequestQueueScreening(input: {
   }
 
   const duplicate = relevantRecords.find((record) => buildRequestDedupeKey(record.input) === dedupeKey);
-  if (duplicate) {
-    return {
-      decision: "reject_duplicate",
-      reason: `duplicate_of_request:${duplicate.requestId}`,
-      queuePriority: computeHeuristicQueuePriority(input.candidate),
-      dedupeKey,
-      conflictKey,
-      source: "heuristic"
-    };
-  }
 
   const conflicting = relevantRecords.find((record) => {
     const recordConflictKey = buildRequestConflictKey(record.input);
@@ -673,13 +962,21 @@ async function evaluateRequestQueueScreening(input: {
   });
 
   const rejectConflictEnabled = resolveRequestRejectConflictEnabled();
-  const provisionalDecision: "allow" | "reject_conflict" =
-    conflicting && rejectConflictEnabled ? "reject_conflict" : "allow";
-  const provisionalReason =
-    conflicting && rejectConflictEnabled ? `conflict_with_request:${conflicting.requestId}` : undefined;
+  const heuristicPreRejectEnabled = resolveRequestHeuristicPreRejectEnabled();
+  let provisionalDecision: "allow" | "reject_conflict" | "reject_duplicate" = "allow";
+  let provisionalReason: string | undefined;
+  let matchedRequestId = duplicate?.requestId ?? conflicting?.requestId;
+  if (heuristicPreRejectEnabled && duplicate) {
+    provisionalDecision = "reject_duplicate";
+    provisionalReason = `duplicate_of_request:${duplicate.requestId}`;
+  } else if (heuristicPreRejectEnabled && conflicting && rejectConflictEnabled) {
+    provisionalDecision = "reject_conflict";
+    provisionalReason = `conflict_with_request:${conflicting.requestId}`;
+  }
   let queuePriority = computeHeuristicQueuePriority(input.candidate);
-  let decision: RequestQueueScreeningResult["decision"] = provisionalDecision;
+  let decision: RequestQueueScreeningResult["decision"] = provisionalDecision === "allow" ? "allow" : provisionalDecision;
   let reason = provisionalReason;
+  let similarity: number | undefined;
   let source: RequestQueueScreeningResult["source"] = "heuristic";
 
   const externalDecision = await callRequestScreeningService({
@@ -704,12 +1001,23 @@ async function evaluateRequestQueueScreening(input: {
     if (externalDecision.reason) {
       reason = externalDecision.reason;
     }
+    if (externalDecision.matchedRequestId) {
+      matchedRequestId = externalDecision.matchedRequestId;
+    }
+    if (externalDecision.similarity !== undefined) {
+      similarity = externalDecision.similarity;
+    }
     source = source === "heuristic" ? "heuristic+screening_service" : "screening_service";
+  } else if (!heuristicPreRejectEnabled && resolveRequestScreeningServiceUrl()) {
+    // Screening service is configured but unavailable: allow by fallback and mark source.
+    source = "screening_service";
   }
 
   return {
     decision,
     reason,
+    matchedRequestId,
+    similarity,
     queuePriority,
     dedupeKey,
     conflictKey,
@@ -1758,13 +2066,14 @@ function buildNodeHeartbeatMessage(input: { walletAddress: string; endpointUrl: 
 }
 
 async function handleGetRequest(requestId: string): Promise<Response> {
+  const localRecord = await getRequest(requestId);
   if (resolveOnchainReadEnabled()) {
     try {
       const onchainRecord = await getRequestFromOnchain(requestId);
       if (onchainRecord) {
         return jsonResponse({
           ok: true,
-          data: buildRequestResponse(onchainRecord)
+          data: buildRequestResponse(mergeLocalAndOnchainRequest(localRecord, onchainRecord))
         });
       }
     } catch (error) {
@@ -1781,14 +2090,13 @@ async function handleGetRequest(requestId: string): Promise<Response> {
     }
   }
 
-  const record = await getRequest(requestId);
-  if (!record) {
+  if (!localRecord) {
     return jsonResponse({ ok: false, error: "request_not_found" }, 404);
   }
 
   return jsonResponse({
     ok: true,
-    data: buildRequestResponse(record)
+    data: buildRequestResponse(localRecord)
   });
 }
 
@@ -2358,24 +2666,26 @@ async function handleRunVerification(req: Request, requestId: string): Promise<R
     existing = screened.record;
   }
 
-  const worldIdConsumeAuth = await requireWorldIdForWallet(req, existing.input.submitterAddress, { consumeToken: true });
-  if (!worldIdConsumeAuth.ok) {
-    logServerFailure("request.run_verification.world_id_denied", {
-      traceId,
-      requestId,
-      walletAddress: existing.input.submitterAddress,
-      error: worldIdConsumeAuth.error,
-      detail: worldIdConsumeAuth.detail ?? null
-    });
-    return jsonResponse(
-      {
-        ok: false,
+  if (resolveRequestRequireWorldIdOnRun()) {
+    const worldIdConsumeAuth = await requireWorldIdForWallet(req, existing.input.submitterAddress, { consumeToken: true });
+    if (!worldIdConsumeAuth.ok) {
+      logServerFailure("request.run_verification.world_id_denied", {
+        traceId,
+        requestId,
+        walletAddress: existing.input.submitterAddress,
         error: worldIdConsumeAuth.error,
-        detail: worldIdConsumeAuth.detail,
-        traceId
-      },
-      worldIdConsumeAuth.status
-    );
+        detail: worldIdConsumeAuth.detail ?? null
+      });
+      return jsonResponse(
+        {
+          ok: false,
+          error: worldIdConsumeAuth.error,
+          detail: worldIdConsumeAuth.detail,
+          traceId
+        },
+        worldIdConsumeAuth.status
+      );
+    }
   }
 
   return executeVerificationForRecord(req, existing);
@@ -2575,21 +2885,23 @@ async function handleRegisterNode(req: Request): Promise<Response> {
     );
   }
 
-  const worldIdAuth = await requireWorldIdForWallet(req, normalizedWalletAddress);
-  if (!worldIdAuth.ok) {
-    logServerFailure("node.register.world_id_failed", {
-      walletAddress: normalizedWalletAddress,
-      error: worldIdAuth.error,
-      detail: worldIdAuth.detail ?? null
-    });
-    return jsonResponse(
-      {
-        ok: false,
+  if (resolveNodeRequireWorldIdOnRegister()) {
+    const worldIdAuth = await requireWorldIdForWallet(req, normalizedWalletAddress);
+    if (!worldIdAuth.ok) {
+      logServerFailure("node.register.world_id_failed", {
+        walletAddress: normalizedWalletAddress,
         error: worldIdAuth.error,
-        detail: worldIdAuth.detail
-      },
-      worldIdAuth.status
-    );
+        detail: worldIdAuth.detail ?? null
+      });
+      return jsonResponse(
+        {
+          ok: false,
+          error: worldIdAuth.error,
+          detail: worldIdAuth.detail
+        },
+        worldIdAuth.status
+      );
+    }
   }
 
   const paymentResult = await enforceX402Payment(req, {
@@ -2704,21 +3016,23 @@ async function handleCreateNodeChallenge(req: Request): Promise<Response> {
     );
   }
 
-  const worldIdAuth = await requireWorldIdForWallet(req, normalizedWalletAddress);
-  if (!worldIdAuth.ok) {
-    logServerFailure("node.challenge.world_id_failed", {
-      walletAddress: normalizedWalletAddress,
-      error: worldIdAuth.error,
-      detail: worldIdAuth.detail ?? null
-    });
-    return jsonResponse(
-      {
-        ok: false,
+  if (resolveNodeRequireWorldIdOnChallenge()) {
+    const worldIdAuth = await requireWorldIdForWallet(req, normalizedWalletAddress);
+    if (!worldIdAuth.ok) {
+      logServerFailure("node.challenge.world_id_failed", {
+        walletAddress: normalizedWalletAddress,
         error: worldIdAuth.error,
-        detail: worldIdAuth.detail
-      },
-      worldIdAuth.status
-    );
+        detail: worldIdAuth.detail ?? null
+      });
+      return jsonResponse(
+        {
+          ok: false,
+          error: worldIdAuth.error,
+          detail: worldIdAuth.detail
+        },
+        worldIdAuth.status
+      );
+    }
   }
 
   const paymentResult = await enforceX402Payment(req, {
@@ -3045,10 +3359,12 @@ async function router(req: Request): Promise<Response> {
   }
 
   if (req.method === "GET" && pathname === "/api/requests") {
-    let items: StoredRequest[];
+    const localItems = await listRequests();
+    let items: StoredRequest[] = localItems;
     if (resolveOnchainReadEnabled()) {
       try {
-        items = await listRequestsFromOnchain();
+        const onchainItems = await listRequestsFromOnchain();
+        items = mergeLocalAndOnchainRequestLists(localItems, onchainItems);
       } catch (error) {
         if (resolveOnchainReadStrict()) {
           return jsonResponse(
@@ -3060,10 +3376,8 @@ async function router(req: Request): Promise<Response> {
             502
           );
         }
-        items = await listRequests();
+        items = localItems;
       }
-    } else {
-      items = await listRequests();
     }
     const queued = sortQueuedRequests(items.filter((record) => record.status === "PENDING"));
     const nonQueued = items

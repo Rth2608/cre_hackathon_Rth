@@ -21,6 +21,17 @@ interface SubmitNodeLifecycleParams {
   lifecycleId?: string;
 }
 
+export interface SubmitVectorScreeningParams {
+  requestId: string;
+  vectorStatusCode: number;
+  queueDecisionCode: number;
+  similarityBps: number;
+  matchedRequestId?: string;
+  screeningHash: string;
+  reasonHash: string;
+  evidenceUri: string;
+}
+
 export interface SubmitPorProofParams {
   marketId: number;
   epoch: number;
@@ -148,6 +159,26 @@ function buildConsensusIdempotencyKey(input: {
   });
 }
 
+function buildVectorScreeningIdempotencyKey(input: {
+  contractAddress: string;
+  chainIdFromEnv?: number;
+  params: SubmitVectorScreeningParams;
+}): string {
+  return hashObject({
+    scope: "submit_vector_screening_onchain",
+    contractAddress: input.contractAddress.toLowerCase(),
+    chainId: input.chainIdFromEnv ?? null,
+    requestId: input.params.requestId.toLowerCase(),
+    vectorStatusCode: input.params.vectorStatusCode,
+    queueDecisionCode: input.params.queueDecisionCode,
+    similarityBps: input.params.similarityBps,
+    matchedRequestId: input.params.matchedRequestId?.toLowerCase() ?? null,
+    screeningHash: input.params.screeningHash.toLowerCase(),
+    reasonHash: input.params.reasonHash.toLowerCase(),
+    evidenceUri: input.params.evidenceUri
+  });
+}
+
 function toBytes32(hexOrString: string): string {
   const normalized = hexOrString.startsWith("0x") ? hexOrString : `0x${hexOrString}`;
   if (/^0x[0-9a-fA-F]{64}$/.test(normalized)) {
@@ -155,6 +186,8 @@ function toBytes32(hexOrString: string): string {
   }
   return id(hexOrString);
 }
+
+const ZERO_BYTES32 = `0x${"0".repeat(64)}`;
 
 function buildSourcesHash(sourceUrls: string[]): string {
   const sorted = [...sourceUrls].sort((a, b) => a.localeCompare(b));
@@ -327,6 +360,102 @@ export async function submitConsensusOnchain(params: SubmitOnchainParams): Promi
 
   throw new Error(
     `onchain_submit_failed: ${stringifyError(lastError)} (requestId=${params.requestId}, attempts=${retryMaxAttempts})`
+  );
+}
+
+export async function submitVectorScreeningOnchain(params: SubmitVectorScreeningParams): Promise<OnchainReceipt> {
+  if (!Number.isInteger(params.vectorStatusCode) || params.vectorStatusCode < 0 || params.vectorStatusCode > 255) {
+    throw new Error("vectorStatusCode must be an integer between 0 and 255");
+  }
+  if (!Number.isInteger(params.queueDecisionCode) || params.queueDecisionCode < 0 || params.queueDecisionCode > 255) {
+    throw new Error("queueDecisionCode must be an integer between 0 and 255");
+  }
+  if (!Number.isInteger(params.similarityBps) || params.similarityBps < 0 || params.similarityBps > 10000) {
+    throw new Error("similarityBps must be an integer between 0 and 10000");
+  }
+
+  const rpcUrl = requireEnv("RPC_URL");
+  const contractAddress = getAddress(requireEnv("CONTRACT_ADDRESS"));
+  const privateKey = requireEnv("COORDINATOR_PRIVATE_KEY");
+
+  const chainIdFromEnv = process.env.CHAIN_ID ? Number.parseInt(process.env.CHAIN_ID, 10) : undefined;
+  const provider = new JsonRpcProvider(rpcUrl, chainIdFromEnv);
+  const wallet = new Wallet(privateKey, provider);
+
+  const useBundleFinalize = process.env.USE_DON_BUNDLE_FINALIZE === "true";
+  const contract = new Contract(contractAddress, useBundleFinalize ? DON_CONSENSUS_ABI : LEGACY_REGISTRY_ABI, wallet);
+  const idempotencyKey = buildVectorScreeningIdempotencyKey({
+    contractAddress,
+    chainIdFromEnv,
+    params
+  });
+  const retryMaxAttempts = resolveOnchainSubmitMaxAttempts();
+  const retryDelayMs = resolveOnchainSubmitRetryDelayMs();
+
+  const db = await readOnchainSubmissionDb();
+  const cachedReceipt = db.receipts[idempotencyKey];
+  if (cachedReceipt) {
+    return {
+      ...cachedReceipt,
+      idempotencyKey,
+      idempotencyReused: true
+    };
+  }
+
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= retryMaxAttempts; attempt += 1) {
+    try {
+      const tx = await contract.recordVectorScreening(
+        toBytes32(params.requestId),
+        params.vectorStatusCode,
+        params.queueDecisionCode,
+        params.similarityBps,
+        params.matchedRequestId ? toBytes32(params.matchedRequestId) : ZERO_BYTES32,
+        toBytes32(params.screeningHash),
+        toBytes32(params.reasonHash),
+        params.evidenceUri
+      );
+      const receipt = await tx.wait();
+      const chainId = Number((await provider.getNetwork()).chainId);
+
+      const onchainReceipt: OnchainReceipt = {
+        txHash: tx.hash,
+        blockNumber: receipt.blockNumber,
+        gasUsed: receipt.gasUsed.toString(),
+        chainId,
+        explorerUrl: process.env.TENDERLY_TX_BASE_URL
+          ? `${process.env.TENDERLY_TX_BASE_URL.replace(/\/$/, "")}/${tx.hash}`
+          : undefined,
+        simulated: false,
+        idempotencyKey,
+        idempotencyReused: false,
+        submissionAttempts: attempt
+      };
+
+      db.receipts[idempotencyKey] = onchainReceipt;
+      await writeOnchainSubmissionDb(db);
+      return onchainReceipt;
+    } catch (error) {
+      lastError = error;
+      const retryable = isRetryableOnchainError(error);
+      if (!retryable || attempt >= retryMaxAttempts) {
+        break;
+      }
+      console.warn(
+        `${new Date().toISOString()} onchain.vector_screening.retry ${JSON.stringify({
+          requestId: params.requestId,
+          attempt,
+          maxAttempts: retryMaxAttempts,
+          retryDelayMs,
+          error: stringifyError(error)
+        })}`
+      );
+      await waitMs(retryDelayMs * attempt);
+    }
+  }
+
+  throw new Error(
+    `onchain_vector_submit_failed: ${stringifyError(lastError)} (requestId=${params.requestId}, attempts=${retryMaxAttempts})`
   );
 }
 

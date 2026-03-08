@@ -312,5 +312,4 @@ echo "  cast call $NEW_CONTRACT_ADDRESS \"coordinator()(address)\" --rpc-url \"\
 if [[ "$DEPLOY_PROFILE" == "don" ]]; then
   echo "  cast call $NEW_CONTRACT_ADDRESS \"operatorAllowlist(address)(bool)\" <operator-address> --rpc-url \"\$RPC_URL\""
 fi
-echo
-echo "Reminder: orchestrator/.env 의 COORDINATOR_PRIVATE_KEY가 COORDINATOR_ADDRESS와 동일한 지갑인지 확인하세요."
+echo "Update your dapp env with the new CONTRACT_ADDRESS and RPC_URL as needed."
