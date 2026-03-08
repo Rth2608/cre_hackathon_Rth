@@ -34,6 +34,7 @@ export default function ResultPage() {
   const walletConnected = walletAddress.length > 0;
   const thirdwebConfigured = isThirdwebClientConfigured();
   const requireWorldIdOnRun = String(import.meta.env.VITE_REQUEST_REQUIRE_WORLD_ID_ON_RUN ?? "true").trim().toLowerCase() !== "false";
+  const manualRunEnabled = String(import.meta.env.VITE_REQUEST_MANUAL_RUN_ENABLED ?? "false").trim().toLowerCase() !== "false";
 
   const [request, setRequest] = useState<RequestRecord | null>(null);
   const [loading, setLoading] = useState(true);
@@ -88,6 +89,7 @@ export default function ResultPage() {
 
   const runVerificationReason = useMemo(() => {
     if (!requestId || !request) return "Request not loaded";
+    if (!manualRunEnabled) return "Manual run disabled (auto FIFO mode)";
     if (!thirdwebConfigured) return "Set VITE_THIRDWEB_CLIENT_ID";
     if (!walletConnected || !activeAccount) return "Connect wallet";
     if (!ownedByConnectedWallet) return "Connected wallet does not match request submitter";
@@ -106,7 +108,8 @@ export default function ResultPage() {
     ownedByConnectedWallet,
     worldIdSession,
     worldIdSessionActive,
-    requireWorldIdOnRun
+    requireWorldIdOnRun,
+    manualRunEnabled
   ]);
 
   const canRunVerification = runVerificationReason === "Ready";
@@ -325,19 +328,22 @@ export default function ResultPage() {
                 </p>
               )}
               <div className="action-row">
-                <button type="button" onClick={onRunVerification} disabled={runningVerification || !canRunVerification}>
-                  {runningVerification ? "Running..." : "Run Verification Again"}
-                </button>
+                {manualRunEnabled && (
+                  <button type="button" onClick={onRunVerification} disabled={runningVerification || !canRunVerification}>
+                    {runningVerification ? "Running..." : "Run Verification Again"}
+                  </button>
+                )}
                 {effectiveTraceId && (
                   <button type="button" className="secondary" onClick={onCopyTraceId}>
                     {traceCopied ? "Copied" : "Copy Trace ID"}
                   </button>
                 )}
-                {!worldIdSessionActive && (
+                {manualRunEnabled && requireWorldIdOnRun && !worldIdSessionActive && (
                   <Link to={verifyLink} className="text-link">
                     Verify World ID First
                   </Link>
                 )}
+                {!manualRunEnabled && <span className="small mono">Auto FIFO mode enabled</span>}
               </div>
               {runError && (
                 <p className="error-text">

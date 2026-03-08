@@ -1037,6 +1037,10 @@ function resolveRequestAutoVerifyEnabled(): boolean {
   return parseBooleanEnv(process.env.REQUEST_AUTO_VERIFY_ENABLED, true);
 }
 
+function resolveRequestManualRunEnabled(): boolean {
+  return parseBooleanEnv(process.env.REQUEST_MANUAL_RUN_ENABLED, false);
+}
+
 function pickNextQueuedRequest(records: StoredRequest[]): StoredRequest | null {
   const queued = sortQueuedRequests(records.filter((record) => record.status === "PENDING"));
   return queued[0] ?? null;
@@ -2608,6 +2612,17 @@ async function handleCreateRequest(req: Request): Promise<Response> {
 }
 
 async function handleRunVerification(req: Request, requestId: string): Promise<Response> {
+  if (!resolveRequestManualRunEnabled()) {
+    return jsonResponse(
+      {
+        ok: false,
+        error: "manual_run_disabled",
+        detail: "manual run is disabled; verification runs automatically through FIFO queue."
+      },
+      403
+    );
+  }
+
   let existing = await getRequest(requestId);
   if (!existing) {
     return jsonResponse({ ok: false, error: "request_not_found" }, 404);

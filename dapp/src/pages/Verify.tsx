@@ -433,6 +433,7 @@ export default function VerifyPage() {
   const worldAppMiniRuntime = getWorldAppRuntimeMode() === "miniapp";
   const miniWorldIdConfigured = worldIdConfig.mini.configured;
   const requireWorldIdOnRun = String(import.meta.env.VITE_REQUEST_REQUIRE_WORLD_ID_ON_RUN ?? "true").trim().toLowerCase() !== "false";
+  const manualRunEnabled = String(import.meta.env.VITE_REQUEST_MANUAL_RUN_ENABLED ?? "false").trim().toLowerCase() !== "false";
   const worldChainVirtualConfig = getWorldChainVirtualConfig();
 
   const [requests, setRequests] = useState<RequestRecord[]>([]);
@@ -918,9 +919,11 @@ export default function VerifyPage() {
                 {myRequests.map((record) => {
                   const hasRunWorldId = !requireWorldIdOnRun || (Boolean(worldIdSession?.token) && worldIdSessionActive);
                   const canRunPending =
-                    record.status === "PENDING" && hasRunWorldId && runningRequestId === null;
+                    manualRunEnabled && record.status === "PENDING" && hasRunWorldId && runningRequestId === null;
                   const pendingReason =
-                    !hasRunWorldId
+                    !manualRunEnabled
+                      ? "auto fifo mode"
+                      : !hasRunWorldId
                       ? "verify world id"
                       : runningRequestId !== null
                         ? "another run in progress"
@@ -938,7 +941,7 @@ export default function VerifyPage() {
                         <Link className="text-link" to={`/result/${encodeURIComponent(record.requestId)}`}>
                           Result
                         </Link>
-                        {record.status === "PENDING" && (
+                        {manualRunEnabled && record.status === "PENDING" && (
                           <button
                             type="button"
                             className="secondary"
@@ -983,12 +986,15 @@ export default function VerifyPage() {
                   record.input.submitterAddress.trim().toLowerCase() === walletAddress.trim().toLowerCase();
                 const hasRunWorldId = !requireWorldIdOnRun || (Boolean(worldIdSession?.token) && worldIdSessionActive);
                 const canRunPending =
+                  manualRunEnabled &&
                   record.status === "PENDING" &&
                   ownedByConnectedWallet &&
                   hasRunWorldId &&
                   runningRequestId === null;
                 const pendingReason =
-                  !walletConnected
+                  !manualRunEnabled
+                    ? "auto fifo mode"
+                    : !walletConnected
                     ? "connect wallet"
                     : !ownedByConnectedWallet
                       ? "submitter wallet only"
@@ -1011,7 +1017,7 @@ export default function VerifyPage() {
                       <Link className="text-link" to={`/result/${encodeURIComponent(record.requestId)}`}>
                         Result
                       </Link>
-                      {record.status === "PENDING" && (
+                      {manualRunEnabled && record.status === "PENDING" && (
                         <button
                           type="button"
                           className="secondary"
