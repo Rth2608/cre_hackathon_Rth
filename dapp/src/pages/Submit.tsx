@@ -44,11 +44,11 @@ interface SimilarRequestTemplate {
 const similarityTemplates: SimilarRequestTemplate[] = [
   {
     id: "T1",
-    label: "ETH > 5K by 2026 (A)",
+    label: "ETH 5K Year-End (A)",
     input: {
       question: "Will ETH be above 5,000 USD at 2026-12-31 23:59 UTC?",
       description:
-        "Ethereum price threshold market for end of 2026.",
+        "Ethereum year-end threshold market.",
       resolutionCriteria:
         "Use Reuters coverage for ETH year-end level on 2026-12-31 UTC. PASS if price > 5,000 USD, else FAIL.",
       sourceUrls: [
@@ -58,13 +58,13 @@ const similarityTemplates: SimilarRequestTemplate[] = [
   },
   {
     id: "T2",
-    label: "ETH > 5K by 2026 (B, similar)",
+    label: "ETH 5K Year-End (B, near-duplicate)",
     input: {
-      question: "Will Ethereum close above $5k on 2026-12-31 (UTC)?",
+      question: "Will ETH be above $5,000 at 23:59 UTC on 2026-12-31?",
       description:
-        "Semantically similar to the ETH 5k year-end question.",
+        "Near-duplicate of the ETH year-end threshold market.",
       resolutionCriteria:
-        "Resolve using Reuters year-end ETH price reference for 2026-12-31 UTC. PASS if > 5,000 USD.",
+        "Resolve with Reuters year-end ETH price reference at 2026-12-31 23:59 UTC. PASS if > 5,000 USD, otherwise FAIL.",
       sourceUrls: [
         "https://www.reuters.com/markets/"
       ]

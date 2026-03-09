@@ -253,6 +253,10 @@ function resolveRequestVectorOnchainEvidenceBaseUri(): string | null {
   return value ? value : null;
 }
 
+function resolveRequestFinalizedOpenOnPassEnabled(): boolean {
+  return parseBooleanEnv(process.env.REQUEST_FINALIZED_OPEN_ON_PASS, false);
+}
+
 function resolveRequestStrictFifoResolutionEnabled(): boolean {
   return parseBooleanEnv(process.env.REQUEST_STRICT_FIFO_RESOLUTION_ENABLED, true);
 }
@@ -302,7 +306,8 @@ async function findEarlierUnresolvedRequestForTarget(target: StoredRequest): Pro
 }
 
 function mapRequestStatusToVectorStatus(
-  status: RequestStatus
+  status: RequestStatus,
+  consensus?: StoredRequest["consensus"]
 ): NonNullable<StoredRequest["vectorSync"]>["vectorStatus"] {
   if (status === "PENDING") {
     return "QUEUED";
@@ -311,6 +316,14 @@ function mapRequestStatusToVectorStatus(
     return "VERIFYING";
   }
   if (status === "FINALIZED") {
+    if (resolveRequestFinalizedOpenOnPassEnabled()) {
+      if (consensus?.finalVerdict === "PASS") {
+        return "OPEN";
+      }
+      if (consensus?.finalVerdict === "FAIL") {
+        return "CLOSED";
+      }
+    }
     return "APPROVED_PENDING_OPEN";
   }
   if (isRejectedRequestStatus(status)) {
@@ -572,7 +585,7 @@ function isVectorSyncAppliedForStatus(record: StoredRequest, status: RequestStat
   if (!resolveRequestVectorSyncEnabled()) {
     return true;
   }
-  const expected = mapRequestStatusToVectorStatus(status);
+  const expected = mapRequestStatusToVectorStatus(status, record.consensus);
   return record.vectorSync?.state === "APPLIED" && record.vectorSync.vectorStatus === expected;
 }
 
@@ -618,9 +631,9 @@ async function syncRequestVectorStatus(
     return latestRecord;
   }
 
-  const vectorStatus = mapRequestStatusToVectorStatus(latestRecord.status);
-  if (latestRecord.vectorSync?.state === "APPLIED" && latestRecord.vectorSync.vectorStatus === vectorStatus) {
-    return syncRequestVectorStatusOnchain(latestRecord, vectorStatus, `${trigger}_already_applied`);
+  const resolvedVectorStatus = mapRequestStatusToVectorStatus(latestRecord.status, latestRecord.consensus);
+  if (latestRecord.vectorSync?.state === "APPLIED" && latestRecord.vectorSync.vectorStatus === resolvedVectorStatus) {
+    return syncRequestVectorStatusOnchain(latestRecord, resolvedVectorStatus, `${trigger}_already_applied`);
   }
 
   const currentAttempts = latestRecord.vectorSync?.attempts ?? 0;
@@ -628,7 +641,7 @@ async function syncRequestVectorStatus(
     ...latestRecord,
     vectorSync: {
       state: "APPLYING",
-      vectorStatus,
+      vectorStatus: resolvedVectorStatus,
       attempts: currentAttempts + 1,
       updatedAt: nowIso(),
       lastError: undefined
@@ -665,7 +678,7 @@ async function syncRequestVectorStatus(
     const response = await fetch(url, {
       method: "POST",
       headers,
-      body: JSON.stringify(buildVectorSyncPayload(applyingRecord, vectorStatus)),
+      body: JSON.stringify(buildVectorSyncPayload(applyingRecord, resolvedVectorStatus)),
       signal: timeoutController.signal
     });
 
@@ -695,11 +708,11 @@ async function syncRequestVectorStatus(
       }
     };
     await saveRequest(appliedRecord);
-    const appliedWithOnchain = await syncRequestVectorStatusOnchain(appliedRecord, vectorStatus, trigger);
+    const appliedWithOnchain = await syncRequestVectorStatusOnchain(appliedRecord, resolvedVectorStatus, trigger);
     logServerEvent("info", "request.vector_sync.applied", {
       requestId: appliedWithOnchain.requestId,
       requestStatus: appliedWithOnchain.status,
-      vectorStatus,
+      vectorStatus: resolvedVectorStatus,
       trigger
     });
     return appliedWithOnchain;
@@ -728,7 +741,7 @@ async function syncRequestVectorStatus(
     logServerFailure("request.vector_sync.failed", {
       requestId: failedRecord.requestId,
       requestStatus: failedRecord.status,
-      vectorStatus,
+      vectorStatus: resolvedVectorStatus,
       trigger,
       error: failedRecord.vectorSync?.lastError
     });
