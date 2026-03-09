@@ -44,78 +44,43 @@ interface SimilarRequestTemplate {
 const similarityTemplates: SimilarRequestTemplate[] = [
   {
     id: "T1",
-    label: "ETH 6K by 2027",
+    label: "BTC > 100K by 2026 (A)",
     input: {
-      question: "Will ETH close above $6,000 at least once before January 1, 2027 UTC?",
+      question: "Will BTC be above 100,000 USD at 2026-12-31 23:59 UTC?",
       description:
-        "Track whether ETH/USD records any daily close strictly above 6000 USD before 2027-01-01 00:00:00 UTC.",
+        "Bitcoin price threshold market for end of 2026.",
       resolutionCriteria:
-        "Resolve YES if Reuters or Bloomberg market coverage confirms an ETH/USD daily close greater than 6000 USD before the deadline. Otherwise resolve NO.",
+        "Use Reuters coverage for BTC year-end level on 2026-12-31 UTC. PASS if price > 100,000 USD, else FAIL.",
       sourceUrls: [
-        "https://www.reuters.com/",
-        "https://www.bloomberg.com/"
+        "https://www.reuters.com/markets/"
       ]
     }
   },
   {
     id: "T2",
-    label: "SOL Outage Q3 2026",
+    label: "BTC > 100K by 2026 (B, similar)",
     input: {
-      question: "Will Solana mainnet experience any outage longer than 120 minutes during Q3 2026?",
+      question: "Will Bitcoin close above $100k on 2026-12-31 (UTC)?",
       description:
-        "Monitor incidents between 2026-07-01 and 2026-09-30 UTC and check whether cumulative unavailability in a single event exceeds 120 minutes.",
+        "Semantically similar to the BTC 100k year-end question.",
       resolutionCriteria:
-        "Resolve YES if Reuters or The Block publishes incident reporting showing a Solana outage duration over 120 minutes in the period. Otherwise resolve NO.",
+        "Resolve using Reuters year-end BTC price reference for 2026-12-31 UTC. PASS if > 100,000 USD.",
       sourceUrls: [
-        "https://www.reuters.com/",
-        "https://www.theblock.co/"
+        "https://www.reuters.com/markets/"
       ]
     }
   },
   {
     id: "T3",
-    label: "Fed Cut by Sep 2026",
+    label: "US CPI < 3.0% (different topic)",
     input: {
-      question: "Will the U.S. Federal Reserve cut the target rate by at least 25 bps by September 30, 2026?",
+      question: "Will U.S. CPI YoY be below 3.0% in the first Reuters report after the Dec 2026 BLS release?",
       description:
-        "Track FOMC decisions through 2026-09-30 UTC and evaluate whether cumulative easing from the starting target range reaches at least 25 basis points.",
+        "Macro inflation market, intentionally different from crypto topic.",
       resolutionCriteria:
-        "Resolve YES if Federal Reserve statements or Reuters/WSJ reporting confirm at least one 25 bps total cut by the deadline. Otherwise resolve NO.",
+        "Use the first Reuters article reporting the Dec 2026 U.S. CPI YoY value. PASS if CPI YoY < 3.0%, else FAIL.",
       sourceUrls: [
-        "https://www.federalreserve.gov/",
-        "https://www.reuters.com/",
-        "https://www.wsj.com/"
-      ]
-    }
-  },
-  {
-    id: "T4",
-    label: "XRP ETF Approval",
-    input: {
-      question: "Will the SEC approve a U.S. spot XRP ETF before December 31, 2026 UTC?",
-      description:
-        "Track official SEC filings and major financial press reports for a spot XRP ETF approval decision before the 2026 year-end cutoff.",
-      resolutionCriteria:
-        "Resolve YES only if an SEC order or filing confirms approval of a U.S. spot XRP ETF by the deadline. Otherwise resolve NO.",
-      sourceUrls: [
-        "https://www.sec.gov/",
-        "https://www.reuters.com/",
-        "https://www.bloomberg.com/"
-      ]
-    }
-  },
-  {
-    id: "T5",
-    label: "BTC Dominance < 45%",
-    input: {
-      question: "Will Bitcoin market dominance fall below 45% on any day before October 1, 2026 UTC?",
-      description:
-        "Track daily BTC dominance percentage and check if at least one published daily reading is strictly below 45.0% before the deadline.",
-      resolutionCriteria:
-        "Resolve YES if CoinGecko or Reuters market data coverage shows BTC dominance under 45% before 2026-10-01 00:00:00 UTC. Otherwise resolve NO.",
-      sourceUrls: [
-        "https://www.coingecko.com/",
-        "https://www.reuters.com/"
+        "https://www.reuters.com/world/us/"
       ]
     }
   }
@@ -509,6 +474,10 @@ export default function SubmitPage() {
   const [requestId, setRequestId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const questionRef = useRef<HTMLTextAreaElement | null>(null);
+  const descriptionRef = useRef<HTMLTextAreaElement | null>(null);
+  const criteriaRef = useRef<HTMLTextAreaElement | null>(null);
+  const sourceUrlsRef = useRef<HTMLTextAreaElement | null>(null);
 
   const miniVerifyRawPayloadsRef = useRef<MiniAppVerifyActionPayload[]>([]);
 
@@ -548,6 +517,20 @@ export default function SubmitPage() {
       // handled on submit via retry path
     }
   }, [walletConnected, worldAppMiniRuntime, worldIdConfig.mini.configured, worldIdConfig.mini.appId]);
+
+  useEffect(() => {
+    const resize = (element: HTMLTextAreaElement | null) => {
+      if (!element) {
+        return;
+      }
+      element.style.height = "auto";
+      element.style.height = `${element.scrollHeight}px`;
+    };
+    resize(questionRef.current);
+    resize(descriptionRef.current);
+    resize(criteriaRef.current);
+    resize(sourceUrlsRef.current);
+  }, [form.question, form.description, form.resolutionCriteria, form.sourceUrls]);
 
   const nativeBalanceText =
     walletBalanceLoading
@@ -747,7 +730,7 @@ export default function SubmitPage() {
 
         <section className="status-card">
           <h2>Quick Similarity Templates</h2>
-          <p>Choose one template to auto-fill. These five templates are intentionally diverse to reduce duplicate similarity hits.</p>
+          <p>Choose one template to auto-fill. T1 and T2 are intentionally similar for duplicate testing, and T3 is a different topic for full verify flow.</p>
           <div className="action-row">
             {similarityTemplates.map((template) => (
               <button
@@ -766,9 +749,11 @@ export default function SubmitPage() {
         <form onSubmit={onSubmit} className="form-grid">
           <label>
             Question
-            <input
+            <textarea
+              ref={questionRef}
               value={form.question}
               onChange={(event) => setForm((prev) => ({ ...prev, question: event.target.value }))}
+              rows={2}
               required
             />
           </label>
@@ -776,6 +761,7 @@ export default function SubmitPage() {
           <label>
             Description
             <textarea
+              ref={descriptionRef}
               value={form.description}
               onChange={(event) => setForm((prev) => ({ ...prev, description: event.target.value }))}
               rows={3}
@@ -786,6 +772,7 @@ export default function SubmitPage() {
           <label>
             Resolution Criteria
             <textarea
+              ref={criteriaRef}
               value={form.resolutionCriteria}
               onChange={(event) => setForm((prev) => ({ ...prev, resolutionCriteria: event.target.value }))}
               rows={3}
@@ -796,6 +783,7 @@ export default function SubmitPage() {
           <label>
             Source URLs (one per line)
             <textarea
+              ref={sourceUrlsRef}
               value={form.sourceUrls.join("\n")}
               onChange={(event) =>
                 setForm((prev) => ({
