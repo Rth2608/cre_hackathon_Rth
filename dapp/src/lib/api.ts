@@ -232,13 +232,6 @@ function encodeBase64Utf8(value: string): string {
 }
 
 function resolveAuthWalletAddress(walletAddress: string, account?: Account): string {
-  if (MiniKit.isInstalled()) {
-    const miniWallet = extractEvmAddress(MiniKit.user?.walletAddress);
-    if (miniWallet) {
-      return miniWallet;
-    }
-  }
-
   const accountWallet =
     typeof (account as { address?: unknown } | undefined)?.address === "string"
       ? ((account as { address?: string }).address ?? "")
@@ -246,6 +239,13 @@ function resolveAuthWalletAddress(walletAddress: string, account?: Account): str
   const normalizedAccountWallet = extractEvmAddress(accountWallet);
   if (normalizedAccountWallet) {
     return normalizedAccountWallet;
+  }
+
+  if (MiniKit.isInstalled()) {
+    const miniWallet = extractEvmAddress(MiniKit.user?.walletAddress);
+    if (miniWallet) {
+      return miniWallet;
+    }
   }
 
   return extractEvmAddress(walletAddress) ?? toLowerAddress(walletAddress);
