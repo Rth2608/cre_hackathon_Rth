@@ -313,7 +313,6 @@ async function signWithMiniKitFallback(input: {
 
 async function walletAuthWithMiniKit(input: {
   nonce: string;
-  requestId: string;
 }): Promise<{ message: string; signature: string; walletAddress?: string; version?: number }> {
   if (typeof window === "undefined") {
     throw new Error("minikit_wallet_auth_unavailable: no_window");
@@ -324,8 +323,7 @@ async function walletAuthWithMiniKit(input: {
 
   const { finalPayload } = await MiniKit.commandsAsync.walletAuth({
     nonce: input.nonce,
-    statement: "CRE Wallet Auth v1",
-    requestId: input.requestId
+    statement: "CRE Wallet Auth v1"
   });
   const payload = finalPayload as Record<string, unknown> | null;
   if (!payload || payload.status !== "success") {
@@ -370,10 +368,8 @@ async function buildWalletAuthHeaders(input: {
   const timestamp = String(Date.now());
   let effectiveWalletAddress = requestedWalletAddress;
   if (MiniKit.isInstalled()) {
-    const requestId = `${input.method.toUpperCase()}:${input.path}`;
     const walletAuth = await walletAuthWithMiniKit({
-      nonce: timestamp,
-      requestId
+      nonce: timestamp
     });
     if (walletAuth.walletAddress) {
       effectiveWalletAddress = walletAuth.walletAddress;
@@ -385,7 +381,6 @@ async function buildWalletAuthHeaders(input: {
         [WALLET_AUTH_SIWE_MESSAGE_HEADER]: encodeBase64Utf8(walletAuth.message),
         [WALLET_AUTH_SIWE_SIGNATURE_HEADER]: walletAuth.signature,
         [WALLET_AUTH_SIWE_ADDRESS_HEADER]: walletAuth.walletAddress ?? effectiveWalletAddress,
-        [WALLET_AUTH_SIWE_REQUEST_ID_HEADER]: requestId,
         ...(walletAuth.version ? { [WALLET_AUTH_SIWE_VERSION_HEADER]: String(walletAuth.version) } : {})
       },
       walletAddress: effectiveWalletAddress
