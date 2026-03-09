@@ -44,13 +44,13 @@ interface SimilarRequestTemplate {
 const similarityTemplates: SimilarRequestTemplate[] = [
   {
     id: "T1",
-    label: "BTC > 100K by 2026 (A)",
+    label: "ETH > 5K by 2026 (A)",
     input: {
-      question: "Will BTC be above 100,000 USD at 2026-12-31 23:59 UTC?",
+      question: "Will ETH be above 5,000 USD at 2026-12-31 23:59 UTC?",
       description:
-        "Bitcoin price threshold market for end of 2026.",
+        "Ethereum price threshold market for end of 2026.",
       resolutionCriteria:
-        "Use Reuters coverage for BTC year-end level on 2026-12-31 UTC. PASS if price > 100,000 USD, else FAIL.",
+        "Use Reuters coverage for ETH year-end level on 2026-12-31 UTC. PASS if price > 5,000 USD, else FAIL.",
       sourceUrls: [
         "https://www.reuters.com/markets/"
       ]
@@ -58,13 +58,13 @@ const similarityTemplates: SimilarRequestTemplate[] = [
   },
   {
     id: "T2",
-    label: "BTC > 100K by 2026 (B, similar)",
+    label: "ETH > 5K by 2026 (B, similar)",
     input: {
-      question: "Will Bitcoin close above $100k on 2026-12-31 (UTC)?",
+      question: "Will Ethereum close above $5k on 2026-12-31 (UTC)?",
       description:
-        "Semantically similar to the BTC 100k year-end question.",
+        "Semantically similar to the ETH 5k year-end question.",
       resolutionCriteria:
-        "Resolve using Reuters year-end BTC price reference for 2026-12-31 UTC. PASS if > 100,000 USD.",
+        "Resolve using Reuters year-end ETH price reference for 2026-12-31 UTC. PASS if > 5,000 USD.",
       sourceUrls: [
         "https://www.reuters.com/markets/"
       ]
