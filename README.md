@@ -1,12 +1,18 @@
 # CRE Prediction Market Demo
 
-End-to-end demo for multi-DON style verification:
+End-to-end demo aligned to the current CRE-based automated market verification pipeline:
 
-1. User submits a prediction market request from dApp.
-2. Orchestrator validates sources, applies x402 payment guard, and auto-matches verifier nodes.
-3. Consensus engine computes weighted result.
-4. Coordinator submits final result to on-chain registry (Tenderly Virtual Network target).
-5. dApp shows verdict, score, report hash, tx hash.
+1. User submits a market request from Mini App/Web UI with wallet auth (+ World ID on create).
+2. Orchestrator enqueues request and processes it in strict FIFO order.
+3. Vector screening service computes embeddings and checks Qdrant for duplicate/conflict markets.
+4. Duplicate/conflict requests are rejected early; clean requests proceed to verification.
+5. Orchestrator fans out the same request to 4 worker endpoints (GPT/Gemini/Grok/Claude).
+6. Each worker runs `RUNTIME_NODE_EXECUTION_MODE=cre_confidential_http` and calls its verifier service over HTTP bearer auth.
+7. Workers return `report + signedReport + executionReceipt`; orchestrator validates bundle/quorum (3/4) and computes consensus.
+8. Coordinator writes onchain records on Tenderly/World Chain Sepolia path:
+   - vector evidence: `recordVectorScreening`
+   - verification finalization: `finalizeWithBundle`
+9. dApp shows status transitions, vector evidence tx, consensus, and final tx hash.
 
 ## Monorepo layout
 
@@ -217,9 +223,9 @@ Behavior notes:
 
 ## Orchestrator REST API
 
-- `POST /api/requests` (create + auto-run verification)
+- `POST /api/requests` (create + queue for auto FIFO verification)
 - `GET /api/requests/:requestId`
-- `POST /api/requests/:requestId/run-verification` (optional manual rerun/admin fallback)
+- `POST /api/requests/:requestId/run-verification` (optional manual rerun; often disabled in auto FIFO mode)
 - `GET /api/requests/:requestId/report`
 - `GET /api/nodes`
 - `POST /api/world-id/verify`
@@ -363,7 +369,10 @@ Synced vector statuses:
 
 - `PENDING -> QUEUED`
 - `RUNNING -> VERIFYING`
-- `FINALIZED -> APPROVED_PENDING_OPEN`
+- `FINALIZED -> APPROVED_PENDING_OPEN` (default)
+  - if `REQUEST_FINALIZED_OPEN_ON_PASS=true`:
+    - `FINALIZED + PASS -> OPEN`
+    - `FINALIZED + FAIL -> CLOSED`
 - `REJECTED_*`, `FAILED_* -> REJECTED`
 
 ### Vector similarity screening test (end-to-end)
@@ -437,6 +446,10 @@ The orchestrator reads chain settings from `orchestrator/.env`:
 - `WORLD_ID_RP_ID` (v4 route id, e.g. `rp_xxx`; required for strict World ID 4.0 verify path)
 - `WORLD_ID_VERIFY_TIMEOUT_MS` (default `8000`)
 - `WORLD_ID_SESSION_TTL_SECONDS` (default `86400`)
+- `REQUEST_VECTOR_ONCHAIN_ENABLED` (write vector screening updates onchain via `recordVectorScreening`)
+- `REQUEST_VECTOR_ONCHAIN_BLOCK_ON_FAILURE` (fail request flow if vector onchain write fails)
+- `REQUEST_VECTOR_ONCHAIN_EVIDENCE_BASE_URI` (optional base URI prefix for vector evidence URI)
+- `REQUEST_FINALIZED_OPEN_ON_PASS` (`true` maps final PASS/FAIL to OPEN/CLOSED vector status)
 - `ONCHAIN_READ_ENABLED` (default `true`, read requests/nodes from contract events)
 - `ONCHAIN_READ_STRICT` (default `true`, fail API read if chain query fails instead of fallback local DB)
 - `ONCHAIN_LOG_FROM_BLOCK` (optional, default `0`, set start block for event scans)

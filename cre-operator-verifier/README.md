@@ -2,9 +2,22 @@
 
 This folder contains a minimal verifier workflow where:
 
-- Node workers **do not** hold raw LLM API keys.
-- The operator stores the API key in CRE secrets (`llmApiKey`).
-- Workflow uses `ConfidentialHTTPClient` to call the embedding API.
+- Node workers **do not** hold raw provider API keys.
+- The operator stores key material in CRE secrets (`llmApiKey`).
+- Workflow uses `ConfidentialHTTPClient` for secret-backed outbound model calls.
+
+## Where this fits in the architecture
+
+This service is the verifier side of the LLM consensus layer:
+
+1. Orchestrator dispatches requests to worker endpoints.
+2. Worker runs with `RUNTIME_NODE_EXECUTION_MODE=cre_confidential_http`.
+3. Worker calls this verifier endpoint (`/verify`) with bearer auth.
+4. Verifier returns a synchronous report payload.
+5. Worker signs the report + execution receipt and returns to orchestrator.
+6. Orchestrator aggregates quorum and writes final records onchain.
+
+In short: this folder implements the confidential verifier that workers call in step 7 of the pipeline diagram.
 
 ## Folder layout
 
@@ -140,3 +153,12 @@ If your gateway is async, add a thin adapter endpoint that:
 1. triggers CRE workflow,
 2. waits/polls execution result,
 3. returns the final `{ report: ... }` object to the worker.
+
+Minimum worker-side env (per node):
+
+```bash
+RUNTIME_NODE_EXECUTION_MODE=cre_confidential_http
+RUNTIME_NODE_CRE_VERIFY_URL=https://<this-verifier>/verify
+RUNTIME_NODE_CRE_VERIFY_AUTH_TOKEN=<bearer-token>
+RUNTIME_NODE_CRE_VERIFY_TIMEOUT_MS=12000
+```
