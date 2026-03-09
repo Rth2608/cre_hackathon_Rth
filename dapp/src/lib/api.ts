@@ -367,26 +367,6 @@ async function buildWalletAuthHeaders(input: {
 
   const timestamp = String(Date.now());
   let effectiveWalletAddress = requestedWalletAddress;
-  if (MiniKit.isInstalled()) {
-    const walletAuth = await walletAuthWithMiniKit({
-      nonce: timestamp
-    });
-    if (walletAuth.walletAddress) {
-      effectiveWalletAddress = walletAuth.walletAddress;
-    }
-    return {
-      headers: {
-        "x-wallet-address": effectiveWalletAddress,
-        [WALLET_AUTH_TIMESTAMP_HEADER]: timestamp,
-        [WALLET_AUTH_SIWE_MESSAGE_HEADER]: encodeBase64Utf8(walletAuth.message),
-        [WALLET_AUTH_SIWE_SIGNATURE_HEADER]: walletAuth.signature,
-        [WALLET_AUTH_SIWE_ADDRESS_HEADER]: walletAuth.walletAddress ?? effectiveWalletAddress,
-        ...(walletAuth.version ? { [WALLET_AUTH_SIWE_VERSION_HEADER]: String(walletAuth.version) } : {})
-      },
-      walletAddress: effectiveWalletAddress
-    };
-  }
-
   let message = buildWalletAuthMessage({
     walletAddress: effectiveWalletAddress,
     method: input.method,
@@ -410,17 +390,46 @@ async function buildWalletAuthHeaders(input: {
     return fallback.signature;
   };
 
-  let signature: string;
-  try {
-    signature = await signMessage({
-      account: input.account,
-      message
-    });
-  } catch (error) {
-    if (!shouldFallbackToMiniKitSign(error)) {
-      throw toError(error);
+  let walletAuthFailedInMiniKit = false;
+  if (MiniKit.isInstalled()) {
+    try {
+      const walletAuth = await walletAuthWithMiniKit({
+        nonce: timestamp
+      });
+      if (walletAuth.walletAddress) {
+        effectiveWalletAddress = walletAuth.walletAddress;
+      }
+      return {
+        headers: {
+          "x-wallet-address": effectiveWalletAddress,
+          [WALLET_AUTH_TIMESTAMP_HEADER]: timestamp,
+          [WALLET_AUTH_SIWE_MESSAGE_HEADER]: encodeBase64Utf8(walletAuth.message),
+          [WALLET_AUTH_SIWE_SIGNATURE_HEADER]: walletAuth.signature,
+          [WALLET_AUTH_SIWE_ADDRESS_HEADER]: walletAuth.walletAddress ?? effectiveWalletAddress,
+          ...(walletAuth.version ? { [WALLET_AUTH_SIWE_VERSION_HEADER]: String(walletAuth.version) } : {})
+        },
+        walletAddress: effectiveWalletAddress
+      };
+    } catch {
+      walletAuthFailedInMiniKit = true;
     }
+  }
+
+  let signature: string;
+  if (walletAuthFailedInMiniKit) {
     signature = await signWithMiniKitAndAlign();
+  } else {
+    try {
+      signature = await signMessage({
+        account: input.account,
+        message
+      });
+    } catch (error) {
+      if (!shouldFallbackToMiniKitSign(error)) {
+        throw toError(error);
+      }
+      signature = await signWithMiniKitAndAlign();
+    }
   }
   signature = normalizeHexSignature(signature);
 
